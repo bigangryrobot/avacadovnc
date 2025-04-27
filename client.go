@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+
 	"github.com/amitbet/vnc2video/logger"
 )
 
@@ -43,9 +44,6 @@ func Connect(ctx context.Context, c net.Conn, cfg *ClientConfig) (*ClientConn, e
 		}
 	}
 
-	canvas := NewVncCanvas(int(conn.Width()), int(conn.Height()))
-	canvas.DrawCursor = cfg.DrawCursor
-	conn.Canvas = canvas
 	return conn, nil
 }
 
