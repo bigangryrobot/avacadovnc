@@ -3,7 +3,8 @@ package vnc2video
 import (
 	"encoding/binary"
 	"net"
-	"github.com/amitbet/vnc2video/logger"
+
+	"github.com/bhmj/vnc2video/logger"
 
 	"io"
 	"time"
@@ -43,7 +44,7 @@ type FbsConn struct {
 // 	return c.fbs.Read(buf)
 // }
 
-//dummy, no writing to this conn...
+// dummy, no writing to this conn...
 func (c *FbsConn) Write(buf []byte) (int, error) {
 	return len(buf), nil
 }

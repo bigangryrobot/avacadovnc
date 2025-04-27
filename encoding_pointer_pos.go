@@ -3,7 +3,8 @@ package vnc2video
 import (
 	"image"
 	"image/draw"
-	"github.com/amitbet/vnc2video/logger"
+
+	"github.com/bhmj/vnc2video/logger"
 )
 
 type CursorPosPseudoEncoding struct {

@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/amitbet/vnc2video/logger"
+	"github.com/bhmj/vnc2video/logger"
 )
 
 type DV9ImageEncoder struct {

@@ -7,8 +7,9 @@ import (
 	"math"
 	"net"
 	"time"
-	vnc "github.com/amitbet/vnc2video"
-	"github.com/amitbet/vnc2video/logger"
+
+	vnc "github.com/bhmj/vnc2video"
+	"github.com/bhmj/vnc2video/logger"
 )
 
 func main() {
