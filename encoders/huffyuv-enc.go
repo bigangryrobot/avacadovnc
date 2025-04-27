@@ -6,7 +6,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
+
 	"github.com/amitbet/vnc2video/logger"
 )
 
@@ -32,8 +34,7 @@ func (enc *HuffYuvImageEncoder) Init(videoFileName string) {
 	cmd := exec.Command(enc.FFMpegBinPath,
 		"-f", "image2pipe",
 		"-vcodec", "ppm",
-		//"-r", strconv.Itoa(framerate),
-		"-r", "12",
+		"-r", strconv.Itoa(enc.Framerate),
 
 		//"-re",
 		//"-i", "pipe:0",

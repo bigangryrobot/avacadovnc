@@ -5,7 +5,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
+
 	"github.com/amitbet/vnc2video/logger"
 )
 
@@ -24,12 +26,10 @@ func (enc *DV9ImageEncoder) Init(videoFileName string) {
 	if !strings.HasSuffix(videoFileName, fileExt) {
 		videoFileName = videoFileName + fileExt
 	}
-	binary := "./ffmpeg"
-	cmd := exec.Command(binary,
+	cmd := exec.Command(enc.FFMpegBinPath,
 		"-f", "image2pipe",
 		"-vcodec", "ppm",
-		//"-r", strconv.Itoa(framerate),
-		"-r", "5",
+		"-r", strconv.Itoa(enc.Framerate),
 		//"-i", "pipe:0",
 		"-i", "-",
 		"-vcodec", "libvpx-vp9", //"libvpx",//"libvpx-vp9"//"libx264"
