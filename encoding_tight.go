@@ -11,6 +11,7 @@ import (
 	"image/draw"
 	"image/jpeg"
 	"io"
+
 	"github.com/amitbet/vnc2video/logger"
 )
 
@@ -355,42 +356,46 @@ func (enc *TightEncoding) handleTightFilters(compCtl uint8, pixelFmt *PixelForma
 }
 
 func (enc *TightEncoding) drawTightPalette(rect *Rectangle, palette color.Palette, tightBytes []byte) {
-	bytePos := 0
-	bitPos := uint8(7)
+	nextByte := 0
 	var palettePos int
 	logger.Tracef("drawTightPalette numbytes=%d", len(tightBytes))
 
-	for y := 0; y < int(rect.Height); y++ {
-		for x := 0; x < int(rect.Width); x++ {
-			if len(palette) == 2 {
-				currByte := tightBytes[bytePos]
-				mask := byte(1) << bitPos
+	if len(palette) == 2 {
+		for y := 0; y < int(rect.Height); y++ {
+			var currByte byte
+			currBit := byte(0)
+			for x := 0; x < int(rect.Width); x++ {
+				if currBit == 0 {
+					currByte = tightBytes[nextByte]
+					nextByte++
+					currBit = 1 << 7
+				}
 
 				palettePos = 0
-				if currByte&mask > 0 {
+				if currByte&currBit > 0 {
 					palettePos = 1
 				}
 
 				//logger.Tracef("currByte=%d, bitpos=%d, bytepos=%d, palettepos=%d, mask=%d, totalBytes=%d", currByte, bitPos, bytePos, palettePos, mask, len(tightBytes))
 
-				if bitPos == 0 {
-					bytePos++
-				}
-				bitPos = ((bitPos - 1) + 8) % 8
-			} else {
-				palettePos = int(tightBytes[bytePos])
-				bytePos++
+				enc.Image.Set(int(rect.X)+x, int(rect.Y)+y, palette[palettePos])
+				//logger.Tracef("(%d,%d): pos: %d col:%d", int(rect.X)+j, int(rect.Y)+i, palettePos, palette[palettePos])
+				currBit >>= 1
 			}
-			//palettePos = palettePos
-			enc.Image.Set(int(rect.X)+x, int(rect.Y)+y, palette[palettePos])
-			//logger.Tracef("(%d,%d): pos: %d col:%d", int(rect.X)+j, int(rect.Y)+i, palettePos, palette[palettePos])
 		}
-
-		// reset bit alignment to first bit in byte (msb)
-		bitPos = 7
+	} else {
+		for y := 0; y < int(rect.Height); y++ {
+			for x := 0; x < int(rect.Width); x++ {
+				palettePos = int(tightBytes[nextByte])
+				nextByte++
+				//palettePos = palettePos
+				enc.Image.Set(int(rect.X)+x, int(rect.Y)+y, palette[palettePos])
+				//logger.Tracef("(%d,%d): pos: %d col:%d", int(rect.X)+j, int(rect.Y)+i, palettePos, palette[palettePos])
+			}
+		}
 	}
-
 }
+
 func (enc *TightEncoding) decodeGradData(rect *Rectangle, buffer []byte) {
 
 	logger.Tracef("putting gradient size: %v on image: %v", rect, enc.Image.Bounds())
@@ -532,16 +537,16 @@ func (enc *TightEncoding) readTightPalette(connReader Conn, bytesPixel int) (col
 		return nil, err
 	}
 
-	paletteSize := colorCount + 1 // add one more
+	paletteSize := int(colorCount) + 1 // add one more
 	//logger.Tracef("----PALETTE_FILTER: paletteSize=%d bytesPixel=%d\n", paletteSize, bytesPixel)
 	//complete palette
-	paletteColorBytes, err := ReadBytes(int(paletteSize)*bytesPixel, connReader)
+	paletteColorBytes, err := ReadBytes(paletteSize*bytesPixel, connReader)
 	if err != nil {
 		logger.Errorf("handleTightFilters: error in handling tight encoding, reading TightFilterPalette.paletteSize: %v", err)
 		return nil, err
 	}
 	var paletteColors color.Palette = make([]color.Color, 0)
-	for i := 0; i < int(paletteSize)*bytesPixel; i += 3 {
+	for i := 0; i < paletteSize*bytesPixel; i += 3 {
 		col := color.RGBA{R: paletteColorBytes[i], G: paletteColorBytes[i+1], B: paletteColorBytes[i+2], A: 1}
 		paletteColors = append(paletteColors, col)
 	}
