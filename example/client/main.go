@@ -18,7 +18,7 @@ import (
 
 func main() {
 	runtime.GOMAXPROCS(4)
-	framerate := 12
+	framerate := 25
 	runWithProfiler := false
 
 	// Establish TCP connection to VNC server.
@@ -36,7 +36,7 @@ func main() {
 	ccfg := &vnc.ClientConfig{
 		SecurityHandlers: []vnc.SecurityHandler{
 			//&vnc.ClientAuthATEN{Username: []byte(os.Args[2]), Password: []byte(os.Args[3])}
-			&vnc.ClientAuthVNC{Password: []byte("12345")},
+			//&vnc.ClientAuthVNC{Password: []byte("12345")},
 			&vnc.ClientAuthNone{},
 		},
 		DrawCursor:      true,
@@ -71,7 +71,7 @@ func main() {
 	//vcodec := &encoders.MJPegImageEncoder{Quality: 60 , Framerate: framerate}
 	//vcodec := &encoders.X264ImageEncoder{FFMpegBinPath: "./ffmpeg", Framerate: framerate}
 	//vcodec := &encoders.HuffYuvImageEncoder{FFMpegBinPath: "./ffmpeg", Framerate: framerate}
-	vcodec := &encoders.QTRLEImageEncoder{FFMpegBinPath: "./ffmpeg", Framerate: framerate}
+	vcodec := &encoders.QTRLEImageEncoder{FFMpegBinPath: "ffmpeg", Framerate: framerate}
 	//vcodec := &encoders.VP8ImageEncoder{FFMpegBinPath:"./ffmpeg", Framerate: framerate}
 	//vcodec := &encoders.DV9ImageEncoder{FFMpegBinPath:"./ffmpeg", Framerate: framerate}
 
@@ -137,6 +137,9 @@ func main() {
 		defer pprof.StopCPUProfile()
 	}
 
+	timer := time.NewTimer(10 * time.Second)
+
+outer:
 	for {
 		select {
 		case err := <-errorCh:
@@ -167,12 +170,16 @@ func main() {
 			}
 		case signal := <-sigc:
 			if signal != nil {
-				vcodec.Close()
-				pprof.StopCPUProfile()
-				time.Sleep(2 * time.Second)
-				os.Exit(1)
+				break outer
 			}
+		case <-timer.C:
+			break outer
 		}
 	}
+
+	vcodec.Close()
+	pprof.StopCPUProfile()
+	time.Sleep(2 * time.Second)
+	os.Exit(1)
 	//cc.Wait()
 }
