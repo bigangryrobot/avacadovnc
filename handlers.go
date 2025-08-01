@@ -1,424 +1,263 @@
 package vnc2video
 
 import (
+	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
-
-	"github.com/bhmj/vnc2video/logger"
+	"io"
 )
-
-// Handler represents handler of handshake
-type Handler interface {
-	Handle(Conn) error
-}
-
-// ProtoVersionLength protocol version length
-const ProtoVersionLength = 12
 
 const (
-	// ProtoVersionUnknown unknown version
-	ProtoVersionUnknown = ""
-	// ProtoVersion33 sets if proto 003.003
-	ProtoVersion33 = "RFB 003.003\n"
-	// ProtoVersion38 sets if proto 003.008
-	ProtoVersion38 = "RFB 003.008\n"
-	// ProtoVersion37 sets if proto 003.007
-	ProtoVersion37 = "RFB 003.007\n"
+	// ProtocolVersion is the VNC protocol version this library supports.
+	ProtocolVersion = "RFB 003.008\n"
 )
 
-// ParseProtoVersion parse protocol version
-func ParseProtoVersion(pv []byte) (uint, uint, error) {
-	var major, minor uint
+// --- Client Handlers ---
 
-	if len(pv) < ProtoVersionLength {
-		return 0, 0, fmt.Errorf("ProtocolVersion message too short (%v < %v)", len(pv), ProtoVersionLength)
-	}
-
-	l, err := fmt.Sscanf(string(pv), "RFB %d.%d\n", &major, &minor)
-	if l != 2 {
-		return 0, 0, fmt.Errorf("error parsing protocol version")
-	}
-	if err != nil {
-		return 0, 0, err
-	}
-
-	return major, minor, nil
-}
-
-// DefaultClientVersionHandler represents default handler
+// DefaultClientVersionHandler handles the protocol version negotiation for the client.
 type DefaultClientVersionHandler struct{}
 
-// Handle provide version handler for client side
-func (*DefaultClientVersionHandler) Handle(c Conn) error {
-	var version [ProtoVersionLength]byte
-
-	if err := binary.Read(c, binary.BigEndian, &version); err != nil {
-		return err
+// Handle reads the server's protocol version and sends the client's version.
+func (h *DefaultClientVersionHandler) Handle(c Conn) error {
+	var serverVersion [12]byte
+	if _, err := io.ReadFull(c, serverVersion[:]); err != nil {
+		return fmt.Errorf("failed to read server version: %w", err)
 	}
 
-	major, minor, err := ParseProtoVersion(version[:])
-	if err != nil {
-		return err
-	}
+	// For now, we don't do anything with the server's version, but a more
+	// robust client might check it for compatibility.
+	c.SetProtoVersion(string(serverVersion[:]))
 
-	pv := ProtoVersionUnknown
-	if major == 3 {
-		if minor >= 8 {
-			pv = ProtoVersion38
-		} else if minor >= 3 {
-			pv = ProtoVersion38
-		}
-	}
-	if pv == ProtoVersionUnknown {
-		return fmt.Errorf("ProtocolVersion handshake failed; unsupported version '%v'", string(version[:]))
-	}
-	c.SetProtoVersion(string(version[:]))
-
-	if err := binary.Write(c, binary.BigEndian, []byte(pv)); err != nil {
-		return err
+	if _, err := c.Write([]byte(ProtocolVersion)); err != nil {
+		return fmt.Errorf("failed to write client version: %w", err)
 	}
 	return c.Flush()
 }
 
-// DefaultServerVersionHandler represents default server handler
-type DefaultServerVersionHandler struct{}
-
-// Handle provide server version handler
-func (*DefaultServerVersionHandler) Handle(c Conn) error {
-	var version [ProtoVersionLength]byte
-	if err := binary.Write(c, binary.BigEndian, []byte(ProtoVersion38)); err != nil {
-		return err
-	}
-	if err := c.Flush(); err != nil {
-		return err
-	}
-	if err := binary.Read(c, binary.BigEndian, &version); err != nil {
-		return err
-	}
-	major, minor, err := ParseProtoVersion(version[:])
-	if err != nil {
-		return err
-	}
-
-	pv := ProtoVersionUnknown
-	if major == 3 {
-		if minor >= 8 {
-			pv = ProtoVersion38
-		} else if minor >= 3 {
-			pv = ProtoVersion33
-		}
-	}
-	if pv == ProtoVersionUnknown {
-		return fmt.Errorf("ProtocolVersion handshake failed; unsupported version '%v'", string(version[:]))
-	}
-
-	c.SetProtoVersion(pv)
-	return nil
-}
-
-// DefaultClientSecurityHandler used for client security handler
+// DefaultClientSecurityHandler handles the security negotiation for the client.
 type DefaultClientSecurityHandler struct{}
 
-// Handle provide client side security handler
-func (*DefaultClientSecurityHandler) Handle(c Conn) error {
-	cfg := c.Config().(*ClientConfig)
-	var numSecurityTypes uint8
-	if err := binary.Read(c, binary.BigEndian, &numSecurityTypes); err != nil {
-		return err
-	}
-	secTypes := make([]SecurityType, numSecurityTypes)
-	if err := binary.Read(c, binary.BigEndian, &secTypes); err != nil {
-		return err
+// Handle negotiates a security type with the server and performs authentication.
+func (h *DefaultClientSecurityHandler) Handle(c Conn) error {
+	var numSecTypes uint8
+	if err := binary.Read(c, binary.BigEndian, &numSecTypes); err != nil {
+		return fmt.Errorf("failed to read number of security types: %w", err)
 	}
 
-	var secType SecurityHandler
-	for _, st := range cfg.SecurityHandlers {
-		for _, sc := range secTypes {
-			if st.Type() == sc {
-				secType = st
-			}
+	if numSecTypes == 0 {
+		// If the server sends 0 security types, it's followed by a reason string.
+		var reasonLen uint32
+		if err := binary.Read(c, binary.BigEndian, &reasonLen); err != nil {
+			return fmt.Errorf("failed to read security failure reason length: %w", err)
 		}
-	}
-
-	if err := binary.Write(c, binary.BigEndian, cfg.SecurityHandlers[0].Type()); err != nil {
-		return err
-	}
-
-	if err := c.Flush(); err != nil {
-		return err
-	}
-
-	err := secType.Auth(c)
-	if err != nil {
-		logger.Error("Authentication error: ", err)
-		return err
-	}
-
-	var authCode uint32
-	if err := binary.Read(c, binary.BigEndian, &authCode); err != nil {
-		return err
-	}
-
-	logger.Tracef("authenticating, secType: %d, auth code(0=success): %d", secType.Type(), authCode)
-	if authCode == 1 {
-		var reasonLength uint32
-		if err := binary.Read(c, binary.BigEndian, &reasonLength); err != nil {
-			return err
+		reason := make([]byte, reasonLen)
+		if _, err := io.ReadFull(c, reason); err != nil {
+			return fmt.Errorf("failed to read security failure reason: %w", err)
 		}
-		reasonText := make([]byte, reasonLength)
-		if err := binary.Read(c, binary.BigEndian, &reasonText); err != nil {
-			return err
-		}
-		return fmt.Errorf("%s", reasonText)
-	}
-	c.SetSecurityHandler(secType)
-	return nil
-}
-
-// DefaultServerSecurityHandler used for server security handler
-type DefaultServerSecurityHandler struct{}
-
-// Handle provide server side security handler
-func (*DefaultServerSecurityHandler) Handle(c Conn) error {
-	cfg := c.Config().(*ServerConfig)
-	var secType SecurityType
-	if c.Protocol() == ProtoVersion37 || c.Protocol() == ProtoVersion38 {
-		if err := binary.Write(c, binary.BigEndian, uint8(len(cfg.SecurityHandlers))); err != nil {
-			return err
-		}
-
-		for _, sectype := range cfg.SecurityHandlers {
-			if err := binary.Write(c, binary.BigEndian, sectype.Type()); err != nil {
-				return err
-			}
-		}
-	} else {
-		st := uint32(0)
-		for _, sectype := range cfg.SecurityHandlers {
-			if uint32(sectype.Type()) > st {
-				st = uint32(sectype.Type())
-				secType = sectype.Type()
-			}
-		}
-		if err := binary.Write(c, binary.BigEndian, st); err != nil {
-			return err
-		}
-	}
-	if err := c.Flush(); err != nil {
-		return err
+		return fmt.Errorf("server reported security failure: %s", reason)
 	}
 
-	if c.Protocol() == ProtoVersion38 {
-		if err := binary.Read(c, binary.BigEndian, &secType); err != nil {
-			return err
-		}
-	}
-	secTypes := make(map[SecurityType]SecurityHandler)
-	for _, sType := range cfg.SecurityHandlers {
-		secTypes[sType.Type()] = sType
+	// Read the raw security types into a byte slice.
+	serverSecTypesBytes := make([]byte, numSecTypes)
+	if _, err := io.ReadFull(c, serverSecTypesBytes); err != nil {
+		return fmt.Errorf("failed to read server security types: %w", err)
 	}
 
-	sType, ok := secTypes[secType]
+	// Convert the byte slice to a slice of SecurityType.
+	serverSecTypes := make([]SecurityType, numSecTypes)
+	for i, b := range serverSecTypesBytes {
+		serverSecTypes[i] = SecurityType(b)
+	}
+
+	cfg, ok := c.Config().(*ClientConfig)
 	if !ok {
-		return fmt.Errorf("security type %d not implemented", secType)
+		return errors.New("invalid connection config type for client")
 	}
 
-	var authCode uint32
-	authErr := sType.Auth(c)
-	if authErr != nil {
-		authCode = uint32(1)
-	}
-
-	if err := binary.Write(c, binary.BigEndian, authCode); err != nil {
-		return err
-	}
-
-	if authErr == nil {
-		if err := c.Flush(); err != nil {
-			return err
-		}
-		c.SetSecurityHandler(sType)
-		return nil
-	}
-
-	if c.Protocol() == ProtoVersion38 {
-		if err := binary.Write(c, binary.BigEndian, uint32(len(authErr.Error()))); err != nil {
-			return err
-		}
-		if err := binary.Write(c, binary.BigEndian, []byte(authErr.Error())); err != nil {
-			return err
-		}
-		if err := c.Flush(); err != nil {
-			return err
-		}
-	}
-	return authErr
-}
-
-// DefaultClientServerInitHandler default client server init handler
-type DefaultClientServerInitHandler struct{}
-
-// Handle provide default server init handler
-func (*DefaultClientServerInitHandler) Handle(c Conn) error {
-	logger.Trace("starting DefaultClientServerInitHandler")
-	var err error
-	srvInit := ServerInit{}
-
-	if err = binary.Read(c, binary.BigEndian, &srvInit.FBWidth); err != nil {
-		return err
-	}
-	if err = binary.Read(c, binary.BigEndian, &srvInit.FBHeight); err != nil {
-		return err
-	}
-	if err = binary.Read(c, binary.BigEndian, &srvInit.PixelFormat); err != nil {
-		return err
-	}
-	if err = binary.Read(c, binary.BigEndian, &srvInit.NameLength); err != nil {
-		return err
-	}
-
-	srvInit.NameText = make([]byte, srvInit.NameLength)
-	if err = binary.Read(c, binary.BigEndian, &srvInit.NameText); err != nil {
-		return err
-	}
-	logger.Tracef("DefaultClientServerInitHandler got serverInit: %v", srvInit)
-	c.SetDesktopName(srvInit.NameText)
-	if c.Protocol() == "aten1" {
-		c.SetWidth(800)
-		c.SetHeight(600)
-		c.SetPixelFormat(NewPixelFormatAten())
-	} else {
-		c.SetWidth(srvInit.FBWidth)
-		c.SetHeight(srvInit.FBHeight)
-
-		//telling the server to use 32bit pixels (with 24 dept, tight standard format)
-		pixelMsg := SetPixelFormat{PF: PixelFormat32bit}
-		pixelMsg.Write(c)
-		c.SetPixelFormat(PixelFormat32bit)
-		//c.SetPixelFormat(srvInit.PixelFormat)
-	}
-	if c.Protocol() == "aten1" {
-		ikvm := struct {
-			_               [8]byte
-			IKVMVideoEnable uint8
-			IKVMKMEnable    uint8
-			IKVMKickEnable  uint8
-			VUSBEnable      uint8
-		}{}
-		if err = binary.Read(c, binary.BigEndian, &ikvm); err != nil {
-			return err
-		}
-	}
-	/*
-		caps := struct {
-			ServerMessagesNum uint16
-			ClientMessagesNum uint16
-			EncodingsNum      uint16
-			_                 [2]byte
-		}{}
-		if err := binary.Read(c, binary.BigEndian, &caps); err != nil {
-			return err
-		}
-
-		caps.ServerMessagesNum = uint16(1)
-		var item [16]byte
-		for i := uint16(0); i < caps.ServerMessagesNum; i++ {
-			if err := binary.Read(c, binary.BigEndian, &item); err != nil {
-				return err
-			}
-			fmt.Printf("server message cap %s\n", item)
-		}
-
-			for i := uint16(0); i < caps.ClientMessagesNum; i++ {
-				if err := binary.Read(c, binary.BigEndian, &item); err != nil {
+	// Find the first security handler supported by both client and server.
+	for _, clientHandler := range cfg.SecurityHandlers {
+		for _, serverSecType := range serverSecTypes {
+			if clientHandler.Type() == serverSecType {
+				// We found a match. Send our choice to the server.
+				if _, err := c.Write([]byte{byte(clientHandler.Type())}); err != nil {
+					return fmt.Errorf("failed to write security type: %w", err)
+				}
+				if err := c.Flush(); err != nil {
 					return err
 				}
-				fmt.Printf("client message cap %s\n", item)
+				// Perform authentication.
+				c.SetSecurityHandler(clientHandler)
+				return clientHandler.Authenticate(c)
 			}
-			for i := uint16(0); i < caps.EncodingsNum; i++ {
-				if err := binary.Read(c, binary.BigEndian, &item); err != nil {
-					return err
-				}
-				fmt.Printf("encoding cap %s\n", item)
-			}
-		//	var pad [1]byte
-		//	if err := binary.Read(c, binary.BigEndian, &pad); err != nil {
-		//		return err
-		//	}
-	}*/
-
-	cfg := c.Config().(*ClientConfig)
-	canvas := NewVncCanvas(int(c.Width()), int(c.Height()))
-	canvas.DrawCursor = cfg.DrawCursor
-	c.(*ClientConn).Canvas = canvas
-
-	for _, enc := range cfg.Encodings {
-		myRenderer, ok := enc.(Renderer)
-
-		if ok {
-			myRenderer.SetTargetImage(canvas)
 		}
 	}
 
-	return nil
+	return errors.New("no supported security types found")
 }
 
-// DefaultServerServerInitHandler default server server init handler
-type DefaultServerServerInitHandler struct{}
-
-// Handle provide default server server init handler
-func (*DefaultServerServerInitHandler) Handle(c Conn) error {
-	if err := binary.Write(c, binary.BigEndian, c.Width()); err != nil {
-		return err
-	}
-	if err := binary.Write(c, binary.BigEndian, c.Height()); err != nil {
-		return err
-	}
-	if err := binary.Write(c, binary.BigEndian, c.PixelFormat()); err != nil {
-		return err
-	}
-	if err := binary.Write(c, binary.BigEndian, uint32(len(c.DesktopName()))); err != nil {
-		return err
-	}
-	if err := binary.Write(c, binary.BigEndian, []byte(c.DesktopName())); err != nil {
-		return err
-	}
-	return c.Flush()
-}
-
-// DefaultClientClientInitHandler default client client init handler
+// DefaultClientClientInitHandler sends the ClientInit message.
 type DefaultClientClientInitHandler struct{}
 
-// Handle provide default client client init handler
-func (*DefaultClientClientInitHandler) Handle(c Conn) error {
-	logger.Trace("starting DefaultClientClientInitHandler")
-	cfg := c.Config().(*ClientConfig)
-	var shared uint8
-	if cfg.Exclusive {
-		shared = 0
-	} else {
-		shared = 1
+// Handle sends the "shared" flag to the server.
+func (h *DefaultClientClientInitHandler) Handle(c Conn) error {
+	cfg, ok := c.Config().(*ClientConfig)
+	if !ok {
+		return errors.New("invalid connection config type for client")
 	}
-	if err := binary.Write(c, binary.BigEndian, shared); err != nil {
-		return err
+
+	var sharedFlag uint8
+	if !cfg.Exclusive {
+		sharedFlag = 1
 	}
-	logger.Tracef("DefaultClientClientInitHandler sending: shared=%d", shared)
+
+	if _, err := c.Write([]byte{sharedFlag}); err != nil {
+		return fmt.Errorf("failed to write shared flag: %w", err)
+	}
 	return c.Flush()
 }
 
-// DefaultServerClientInitHandler default server client init handler
-type DefaultServerClientInitHandler struct{}
+// DefaultClientServerInitHandler reads the ServerInit message.
+type DefaultClientServerInitHandler struct{}
 
-// Handle provide default server client init handler
-func (*DefaultServerClientInitHandler) Handle(c Conn) error {
-	var shared uint8
-	if err := binary.Read(c, binary.BigEndian, &shared); err != nil {
+// Handle reads the server's framebuffer dimensions, pixel format, and desktop name.
+func (h *DefaultClientServerInitHandler) Handle(c Conn) error {
+	var width, height uint16
+	if err := binary.Read(c, binary.BigEndian, &width); err != nil {
 		return err
 	}
-	/* TODO
-	if shared != 1 {
-		c.SetShared(false)
+	if err := binary.Read(c, binary.BigEndian, &height); err != nil {
+		return err
 	}
-	*/
+	c.SetWidth(width)
+	c.SetHeight(height)
+
+	var pf PixelFormat
+	if err := binary.Read(c, binary.BigEndian, &pf); err != nil {
+		return err
+	}
+	c.SetPixelFormat(pf)
+
+	var nameLength uint32
+	if err := binary.Read(c, binary.BigEndian, &nameLength); err != nil {
+		return err
+	}
+	name := make([]byte, nameLength)
+	if _, err := io.ReadFull(c, name); err != nil {
+		return err
+	}
+	c.SetDesktopName(name)
+
 	return nil
+}
+
+// --- Server Handlers ---
+
+// DefaultServerVersionHandler handles protocol version negotiation for the server.
+type DefaultServerVersionHandler struct{}
+
+// Handle sends the server's version and reads the client's.
+func (h *DefaultServerVersionHandler) Handle(c Conn) error {
+	if _, err := c.Write([]byte(ProtocolVersion)); err != nil {
+		return fmt.Errorf("failed to write server version: %w", err)
+	}
+	if err := c.Flush(); err != nil {
+		return err
+	}
+
+	var clientVersion [12]byte
+	if _, err := io.ReadFull(c, clientVersion[:]); err != nil {
+		return fmt.Errorf("failed to read client version: %w", err)
+	}
+
+	// A real server might validate the client version.
+	if !bytes.HasPrefix(clientVersion[:], []byte("RFB")) {
+		return fmt.Errorf("invalid client version signature: %s", clientVersion)
+	}
+
+	return nil
+}
+
+// DefaultServerSecurityHandler handles security negotiation for the server.
+type DefaultServerSecurityHandler struct{}
+
+// Handle sends supported security types and authenticates the client.
+func (h *DefaultServerSecurityHandler) Handle(c Conn) error {
+	cfg, ok := c.Config().(*ServerConfig)
+	if !ok {
+		return errors.New("invalid connection config type for server")
+	}
+
+	secTypes := make([]byte, len(cfg.SecurityHandlers))
+	for i, handler := range cfg.SecurityHandlers {
+		secTypes[i] = byte(handler.Type())
+	}
+
+	if _, err := c.Write([]byte{uint8(len(secTypes))}); err != nil {
+		return fmt.Errorf("failed to write number of security types: %w", err)
+	}
+	if _, err := c.Write(secTypes); err != nil {
+		return fmt.Errorf("failed to write security types: %w", err)
+	}
+	if err := c.Flush(); err != nil {
+		return err
+	}
+
+	var clientChoice uint8
+	if err := binary.Read(c, binary.BigEndian, &clientChoice); err != nil {
+		return fmt.Errorf("failed to read client security choice: %w", err)
+	}
+
+	for _, handler := range cfg.SecurityHandlers {
+		if handler.Type() == SecurityType(clientChoice) {
+			c.SetSecurityHandler(handler)
+			return handler.Authenticate(c)
+		}
+	}
+
+	return fmt.Errorf("client chose an unsupported security type: %d", clientChoice)
+}
+
+// DefaultServerClientInitHandler reads the ClientInit message on the server.
+type DefaultServerClientInitHandler struct{}
+
+// Handle reads the client's "shared" flag.
+func (h *DefaultServerClientInitHandler) Handle(c Conn) error {
+	var sharedFlag [1]byte
+	if _, err := io.ReadFull(c, sharedFlag[:]); err != nil {
+		return fmt.Errorf("failed to read client init (shared flag): %w", err)
+	}
+	// A real server would use this flag to manage session sharing.
+	return nil
+}
+
+// DefaultServerServerInitHandler sends the ServerInit message.
+type DefaultServerServerInitHandler struct{}
+
+// Handle sends the server's framebuffer info to the client.
+func (h *DefaultServerServerInitHandler) Handle(c Conn) error {
+	cfg, ok := c.Config().(*ServerConfig)
+	if !ok {
+		return errors.New("invalid connection config type for server")
+	}
+
+	if err := binary.Write(c, binary.BigEndian, cfg.Width); err != nil {
+		return err
+	}
+	if err := binary.Write(c, binary.BigEndian, cfg.Height); err != nil {
+		return err
+	}
+	if err := binary.Write(c, binary.BigEndian, cfg.PixelFormat); err != nil {
+		return err
+	}
+
+	name := []byte(cfg.DesktopName)
+	if err := binary.Write(c, binary.BigEndian, uint32(len(name))); err != nil {
+		return err
+	}
+	if _, err := c.Write(name); err != nil {
+		return err
+	}
+
+	return c.Flush()
 }

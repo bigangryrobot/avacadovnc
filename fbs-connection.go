@@ -1,207 +1,105 @@
 package vnc2video
 
 import (
+	"bufio"
 	"encoding/binary"
-	"net"
-
-	"github.com/bhmj/vnc2video/logger"
-
+	"errors"
+	"fmt"
 	"io"
-	"time"
+	"net"
+	"os"
 )
 
-// Conn represents vnc conection
-type FbsConn struct {
-	FbsReader
-
-	protocol string
-	//c      net.IServerConn
-	//config *ClientConfig
-	colorMap ColorMap
-
-	// Encodings supported by the client. This should not be modified
-	// directly. Instead, SetEncodings should be used.
-	encodings []Encoding
-
-	// Height of the frame buffer in pixels, sent from the server.
-	fbHeight uint16
-
-	// Width of the frame buffer in pixels, sent from the server.
-	fbWidth     uint16
-	desktopName string
-	// The pixel format associated with the connection. This shouldn't
-	// be modified. If you wish to set a new pixel format, use the
-	// SetPixelFormat method.
-	pixelFormat PixelFormat
+// FbsConnection represents a connection that records the VNC stream to a
+// Frame Buffer Stream (FBS) file. It wraps a standard net.Conn.
+type FbsConnection struct {
+	net.Conn
+	file *os.File
 }
 
-// func (c *FbsConn) Close() error {
-// 	return c.fbs.Close()
-// }
-
-// // Read reads data from conn
-// func (c *FbsConn) Read(buf []byte) (int, error) {
-// 	return c.fbs.Read(buf)
-// }
-
-// dummy, no writing to this conn...
-func (c *FbsConn) Write(buf []byte) (int, error) {
-	return len(buf), nil
+// NewFbsConnection creates a new recording connection.
+func NewFbsConnection(conn net.Conn, file *os.File) (*FbsConnection, error) {
+	if file == nil {
+		return nil, errors.New("fbs-connection: file cannot be nil")
+	}
+	return &FbsConnection{
+		Conn: conn,
+		file: file,
+	}, nil
 }
 
-func (c *FbsConn) Conn() net.Conn {
-	return nil
-}
-
-func (c *FbsConn) Config() interface{} {
-	return nil
-}
-
-func (c *FbsConn) Protocol() string {
-	return "RFB 003.008"
-}
-func (c *FbsConn) PixelFormat() PixelFormat {
-	return c.pixelFormat
-}
-
-func (c *FbsConn) SetPixelFormat(pf PixelFormat) error {
-	c.pixelFormat = pf
-	return nil
-}
-
-func (c *FbsConn) ColorMap() ColorMap                       { return c.colorMap }
-func (c *FbsConn) SetColorMap(cm ColorMap)                  { c.colorMap = cm }
-func (c *FbsConn) Encodings() []Encoding                    { return c.encodings }
-func (c *FbsConn) SetEncodings([]EncodingType) error        { return nil }
-func (c *FbsConn) Width() uint16                            { return c.fbWidth }
-func (c *FbsConn) Height() uint16                           { return c.fbHeight }
-func (c *FbsConn) SetWidth(w uint16)                        { c.fbWidth = w }
-func (c *FbsConn) SetHeight(h uint16)                       { c.fbHeight = h }
-func (c *FbsConn) DesktopName() []byte                      { return []byte(c.desktopName) }
-func (c *FbsConn) SetDesktopName(d []byte)                  { c.desktopName = string(d) }
-func (c *FbsConn) Flush() error                             { return nil }
-func (c *FbsConn) Wait()                                    {}
-func (c *FbsConn) SetProtoVersion(string)                   {}
-func (c *FbsConn) SetSecurityHandler(SecurityHandler) error { return nil }
-func (c *FbsConn) SecurityHandler() SecurityHandler         { return nil }
-func (c *FbsConn) GetEncInstance(typ EncodingType) Encoding {
-	for _, enc := range c.encodings {
-		if enc.Type() == typ {
-			return enc
+// Read reads data from the underlying connection and writes it to the FBS file.
+func (fbs *FbsConnection) Read(b []byte) (n int, err error) {
+	n, err = fbs.Conn.Read(b)
+	if n > 0 {
+		// Write the chunk size followed by the data.
+		if errw := binary.Write(fbs.file, binary.BigEndian, uint32(n)); errw != nil {
+			return n, fmt.Errorf("fbs-connection: failed to write chunk size: %w", errw)
+		}
+		if _, errw := fbs.file.Write(b[0:n]); errw != nil {
+			return n, fmt.Errorf("fbs-connection: failed to write chunk data: %w", errw)
 		}
 	}
-	return nil
+	return n, err
 }
 
-type VncStreamFileReader interface {
-	io.Reader
-	CurrentTimestamp() int
-	ReadStartSession() (*ServerInit, error)
-	CurrentPixelFormat() *PixelFormat
-	Encodings() []Encoding
+// Write writes data to the underlying connection. It does not record outgoing data.
+func (fbs *FbsConnection) Write(b []byte) (n int, err error) {
+	return fbs.Conn.Write(b)
 }
 
-type FBSPlayHelper struct {
-	Conn *FbsConn
-	//Fbs              VncStreamFileReader
-	serverMessageMap map[uint8]ServerMessage
-	firstSegDone     bool
-	startTime        int
+// Close closes both the network connection and the file.
+func (fbs *FbsConnection) Close() error {
+	fbs.file.Close()
+	return fbs.Conn.Close()
 }
 
-func NewFbsConn(filename string, encs []Encoding) (*FbsConn, error) {
-
-	fbs, err := NewFbsReader(filename)
-	if err != nil {
-		logger.Error("failed to open fbs reader:", err)
-		return nil, err
-	}
-
-	//NewFbsReader("/Users/amitbet/vncRec/recording.rbs")
-	initMsg, err := fbs.ReadStartSession()
-	if err != nil {
-		logger.Error("failed to open read fbs start session:", err)
-		return nil, err
-	}
-	fbsConn := &FbsConn{FbsReader: *fbs}
-	fbsConn.encodings = encs
-	fbsConn.SetPixelFormat(initMsg.PixelFormat)
-	fbsConn.SetHeight(initMsg.FBHeight)
-	fbsConn.SetWidth(initMsg.FBWidth)
-	fbsConn.SetDesktopName([]byte(initMsg.NameText))
-
-	return fbsConn, nil
+// FbsStreamer is a utility to record a VNC session to an FBS file.
+type FbsStreamer struct {
+	clientConn *ClientConn
+	file       *os.File
 }
 
-func NewFBSPlayHelper(r *FbsConn) *FBSPlayHelper {
-	h := &FBSPlayHelper{Conn: r}
-	h.startTime = int(time.Now().UnixNano() / int64(time.Millisecond))
-
-	h.serverMessageMap = make(map[uint8]ServerMessage)
-	h.serverMessageMap[0] = &FramebufferUpdate{}
-	h.serverMessageMap[1] = &SetColorMapEntries{}
-	h.serverMessageMap[2] = &Bell{}
-	h.serverMessageMap[3] = &ServerCutText{}
-
-	return h
+// NewFbsStreamer creates a new streamer.
+func NewFbsStreamer(cc *ClientConn, f *os.File) *FbsStreamer {
+	return &FbsStreamer{
+		clientConn: cc,
+		file:       f,
+	}
 }
 
-// func (handler *FBSPlayHelper) Consume(seg *RfbSegment) error {
+// RecordSession starts the recording process.
+// This function should be called after a successful VNC handshake.
+func (s *FbsStreamer) RecordSession() error {
+	// Write the FBS header with the server's initial parameters.
+	// This data is now read from the ClientConn object, not a ServerInit message.
+	pf := s.clientConn.PixelFormat()
+	width := s.clientConn.Width()
+	height := s.clientConn.Height()
+	name := s.clientConn.DesktopName()
 
-// 	switch seg.SegmentType {
-// 	case SegmentFullyParsedClientMessage:
-// 		clientMsg := seg.Message.(ClientMessage)
-// 		logger.Tracef("ClientUpdater.Consume:(vnc-server-bound) got ClientMessage type=%s", clientMsg.Type())
-// 		switch clientMsg.Type() {
-
-// 		case FramebufferUpdateRequestMsgType:
-// 			if !handler.firstSegDone {
-// 				handler.firstSegDone = true
-// 				handler.startTime = int(time.Now().UnixNano() / int64(time.Millisecond))
-// 			}
-// 			handler.sendFbsMessage()
-// 		}
-// 		// server.MsgFramebufferUpdateRequest:
-// 	}
-// 	return nil
-// }
-
-func (h *FBSPlayHelper) ReadFbsMessage(SyncWithTimestamps bool, SpeedFactor float64) (ServerMessage, error) {
-	var messageType uint8
-	//messages := make(map[uint8]ServerMessage)
-	fbs := h.Conn
-	//conn := h.Conn
-	err := binary.Read(fbs, binary.BigEndian, &messageType)
-	if err != nil {
-		logger.Error("FBSConn.NewConnHandler: Error in reading FBS: ", err)
-		return nil, err
+	// Write pixel format
+	if err := binary.Write(s.file, binary.BigEndian, &pf); err != nil {
+		return fmt.Errorf("fbs-streamer: failed to write pixel format: %w", err)
 	}
-	startTimeMsgHandling := time.Now()
-	//IClientConn{}
-	//binary.Write(h.Conn, binary.BigEndian, messageType)
-	msg := h.serverMessageMap[messageType]
-	if msg == nil {
-		logger.Error("FBSConn.NewConnHandler: Error unknown message type: ", messageType)
-		return nil, err
+	// Write screen dimensions
+	if err := binary.Write(s.file, binary.BigEndian, &width); err != nil {
+		return fmt.Errorf("fbs-streamer: failed to write width: %w", err)
 	}
-	//read the actual message data
-	//err = binary.Read(fbs, binary.BigEndian, &msg)
-	parsedMsg, err := msg.Read(fbs)
-	if err != nil {
-		logger.Error("FBSConn.NewConnHandler: Error in reading FBS message: ", err)
-		return nil, err
+	if err := binary.Write(s.file, binary.BigEndian, &height); err != nil {
+		return fmt.Errorf("fbs-streamer: failed to write height: %w", err)
+	}
+	// Write desktop name
+	nameLen := uint32(len(name))
+	if err := binary.Write(s.file, binary.BigEndian, &nameLen); err != nil {
+		return fmt.Errorf("fbs-streamer: failed to write name length: %w", err)
+	}
+	if _, err := s.file.Write(name); err != nil {
+		return fmt.Errorf("fbs-streamer: failed to write name: %w", err)
 	}
 
-	millisSinceStart := int(startTimeMsgHandling.UnixNano()/int64(time.Millisecond)) - h.startTime
-	adjestedTimeStamp := float64(fbs.CurrentTimestamp()) / SpeedFactor
-	millisToSleep := adjestedTimeStamp - float64(millisSinceStart)
-
-	if millisToSleep > 0 && SyncWithTimestamps {
-
-		time.Sleep(time.Duration(millisToSleep) * time.Millisecond)
-	} else if millisToSleep < -400 {
-		logger.Errorf("rendering time is noticeably off, change speedup factor: videoTimeLine: %f, currentTime:%d, offset: %f", adjestedTimeStamp, millisSinceStart, millisToSleep)
-	}
-
-	return parsedMsg, nil
+	// The rest of the data is read from the connection and written to the file
+	// by the FbsConnection's Read method. We just need to drain the reader.
+	_, err := io.Copy(io.Discard, bufio.NewReader(s.clientConn.Conn()))
+	return err
 }

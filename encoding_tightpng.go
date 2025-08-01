@@ -2,104 +2,95 @@ package vnc2video
 
 import (
 	"bytes"
-	"encoding/binary"
+	"compress/zlib"
 	"fmt"
-	"image"
-	"image/color"
-	"image/draw"
 	"image/png"
 	"io"
-
-	"github.com/bhmj/vnc2video/logger"
 )
 
-func (*TightPngEncoding) Supported(Conn) bool {
-	return true
-}
-func (*TightPngEncoding) Reset() error {
-	return nil
-}
-
-func (enc *TightPngEncoding) Write(c Conn, rect *Rectangle) error {
-	if err := writeTightCC(c, enc.TightCC); err != nil {
-		return err
-	}
-	cmp := enc.TightCC.Compression
-	switch cmp {
-	case TightCompressionPNG:
-		buf := bPool.Get().(*bytes.Buffer)
-		buf.Reset()
-		defer bPool.Put(buf)
-		pngEnc := &png.Encoder{CompressionLevel: png.BestSpeed}
-		//pngEnc := &png.Encoder{CompressionLevel: png.NoCompression}
-		if err := pngEnc.Encode(buf, enc.Image); err != nil {
-			return err
-		}
-		if err := writeTightLength(c, buf.Len()); err != nil {
-			return err
-		}
-
-		if _, err := buf.WriteTo(c); err != nil {
-			return err
-		}
-	case TightCompressionFill:
-		var tpx TightPixel
-		r, g, b, _ := enc.Image.At(0, 0).RGBA()
-		tpx.R = uint8(r)
-		tpx.G = uint8(g)
-		tpx.B = uint8(b)
-		if err := binary.Write(c, binary.BigEndian, tpx); err != nil {
-			return err
-		}
-	default:
-		return fmt.Errorf("unknown tight compression %d", cmp)
-	}
-	return nil
+// TightPNGEncoding implements the TightPNG encoding, which is a variation
+// of the Tight encoding that uses PNG compression.
+type TightPNGEncoding struct {
+	buffer *bytes.Buffer
 }
 
-type TightPngEncoding struct {
-	TightCC *TightCC
-	Image   draw.Image
+// Type returns the encoding type identifier.
+func (e *TightPNGEncoding) Type() EncodingType {
+	return EncTightPNG
 }
 
-func (*TightPngEncoding) Type() EncodingType { return EncTightPng }
-
-func (enc *TightPngEncoding) Read(c Conn, rect *Rectangle) error {
-	tcc, err := readTightCC(c)
-	logger.Trace("starting to read a tight rect: %v", rect)
+// Read decodes a TightPNG-encoded rectangle.
+func (e *TightPNGEncoding) Read(c Conn, rect *Rectangle) error {
+	// The format is a compact length followed by zlib-compressed PNG data.
+	compressedData, err := e.readCompressedData(c)
 	if err != nil {
-		return err
+		return fmt.Errorf("tight-png: %w", err)
 	}
-	enc.TightCC = tcc
-	cmp := enc.TightCC.Compression
-	switch cmp {
-	case TightCompressionPNG:
-		l, err := readTightLength(c)
-		if err != nil {
-			return err
-		}
-		img, err := png.Decode(io.LimitReader(c, int64(l)))
-		if err != nil {
-			return err
-		}
-		//draw.Draw(enc.Image, enc.Image.Bounds(), img, image.Point{X: int(rect.X), Y: int(rect.Y)}, draw.Src)
-		DrawImage(enc.Image, img, image.Point{X: int(rect.X), Y: int(rect.Y)})
-	case TightCompressionFill:
-		var tpx TightPixel
-		if err := binary.Read(c, binary.BigEndian, &tpx); err != nil {
-			return err
-		}
-		//enc.Image = image.NewRGBA(image.Rect(0, 0, 1, 1))
-		col := color.RGBA{R: tpx.R, G: tpx.G, B: tpx.B, A: 1}
-		myRect := MakeRectFromVncRect(rect)
-		FillRect(enc.Image, &myRect, col)
-		//enc.Image.(draw.Image).Set(0, 0, color.RGBA{R: tpx.R, G: tpx.G, B: tpx.B, A: 1})
-	default:
-		return fmt.Errorf("unknown compression %d", cmp)
+
+	if len(compressedData) == 0 {
+		return nil
 	}
+
+	if e.buffer == nil {
+		e.buffer = &bytes.Buffer{}
+	}
+	e.buffer.Reset()
+	e.buffer.Write(compressedData)
+
+	zlibReader, err := zlib.NewReader(e.buffer)
+	if err != nil {
+		return fmt.Errorf("tight-png: failed to create zlib reader: %w", err)
+	}
+	defer zlibReader.Close()
+
+	img, err := png.Decode(zlibReader)
+	if err != nil {
+		return fmt.Errorf("tight-png: failed to decode png: %w", err)
+	}
+
+	clientConn, ok := c.(*ClientConn)
+	if !ok || clientConn.Canvas == nil {
+		return nil
+	}
+
+	clientConn.Canvas.Draw(img, rect)
 	return nil
 }
 
-func (enc *TightPngEncoding) SetTargetImage(img draw.Image) {
-	enc.Image = img
+// readCompressedData reads a compactly represented length followed by the data itself.
+// This logic is shared with the main Tight encoding.
+func (e *TightPNGEncoding) readCompressedData(c io.Reader) ([]byte, error) {
+	var b [1]byte
+	if _, err := io.ReadFull(c, b[:]); err != nil {
+		return nil, fmt.Errorf("failed to read length byte 1: %w", err)
+	}
+	length := int(b[0] & 0x7F)
+
+	if b[0]&0x80 != 0 {
+		if _, err := io.ReadFull(c, b[:]); err != nil {
+			return nil, fmt.Errorf("failed to read length byte 2: %w", err)
+		}
+		length |= int(b[0]&0x7F) << 7
+		if b[0]&0x80 != 0 {
+			if _, err := io.ReadFull(c, b[:]); err != nil {
+				return nil, fmt.Errorf("failed to read length byte 3: %w", err)
+			}
+			length |= int(b[0]) << 14
+		}
+	}
+
+	if length == 0 {
+		return nil, nil
+	}
+
+	data := make([]byte, length)
+	if _, err := io.ReadFull(c, data); err != nil {
+		return nil, fmt.Errorf("failed to read compressed data (len=%d): %w", length, err)
+	}
+	return data, nil
+}
+
+// Reset cleans up the internal buffer.
+func (e *TightPNGEncoding) Reset() {
+	e.buffer = nil
 }

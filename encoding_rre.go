@@ -2,108 +2,69 @@ package vnc2video
 
 import (
 	"encoding/binary"
-	"image/draw"
+	"fmt"
 	"io"
-	//"image/draw"
 )
 
-type RREEncoding struct {
-	//Colors []Color
-	numSubRects     uint32
-	backgroundColor []byte
-	subRectData     []byte
-	Image           draw.Image
+// RREEncoding implements the RRE (Rise-and-Run-length Encoding), which is
+// efficient for encoding large areas of a single color.
+type RREEncoding struct{}
+
+// Type returns the encoding type identifier.
+func (e *RREEncoding) Type() EncodingType {
+	return EncRRE
 }
 
-func (*RREEncoding) Supported(Conn) bool {
-	return true
-}
-
-func (enc *RREEncoding) SetTargetImage(img draw.Image) {
-	enc.Image = img
-}
-
-func (enc *RREEncoding) Reset() error {
-	return nil
-}
-
-func (*RREEncoding) Type() EncodingType { return EncRRE }
-
-func (enc *RREEncoding) Write(c Conn, rect *Rectangle) error {
-
-	return nil
-}
-
-func (z *RREEncoding) WriteTo(w io.Writer) (n int, err error) {
-	binary.Write(w, binary.BigEndian, z.numSubRects)
-	if err != nil {
-		return 0, err
+// Read decodes RRE-encoded data.
+func (e *RREEncoding) Read(c Conn, rect *Rectangle) error {
+	var numSubRects uint32
+	if err := binary.Read(c, binary.BigEndian, &numSubRects); err != nil {
+		return fmt.Errorf("rre: failed to read number of sub-rectangles: %w", err)
 	}
 
-	w.Write(z.backgroundColor)
-	if err != nil {
-		return 0, err
+	clientConn, ok := c.(*ClientConn)
+	if !ok {
+		return fmt.Errorf("rre: connection is not a client connection")
 	}
 
-	w.Write(z.subRectData)
-
-	if err != nil {
-		return 0, err
-	}
-	b := len(z.backgroundColor) + len(z.subRectData) + 4
-	return b, nil
-}
-
-func (enc *RREEncoding) Read(r Conn, rect *Rectangle) error {
-	//func (z *RREEncoding) Read(pixelFmt *PixelFormat, rect *Rectangle, r io.Reader) (Encoding, error) {
-	pf := r.PixelFormat()
-	//bytesPerPixel := int(pf.BPP / 8)
-
-	var numOfSubrectangles uint32
-	if err := binary.Read(r, binary.BigEndian, &numOfSubrectangles); err != nil {
-		return err
+	pf := c.PixelFormat()
+	bytesPerPixel := pf.BytesPerPixel()
+	if bytesPerPixel == 0 {
+		return fmt.Errorf("rre: bytes per pixel is zero")
 	}
 
-	var err error
-	enc.numSubRects = numOfSubrectangles
-
-	//read whole-rect background color
-	bgColor, err := ReadColor(r, &pf)
-	if err != nil {
-		return err
+	// The first color read is the background color for the entire rectangle.
+	bgColor := make([]byte, bytesPerPixel)
+	if _, err := io.ReadFull(c, bgColor); err != nil {
+		return fmt.Errorf("rre: failed to read background color: %w", err)
 	}
-	imgRect := MakeRectFromVncRect(rect)
-	FillRect(enc.Image, &imgRect, bgColor)
 
-	//read all individual rects (color=bytesPerPixel + x=16b + y=16b + w=16b + h=16b)
+	if clientConn.Canvas != nil {
+		clientConn.Canvas.Fill(bgColor, rect)
+	}
 
-	for i := 0; i < int(numOfSubrectangles); i++ {
-		color, err := ReadColor(r, &pf)
-		if err != nil {
-			return err
+	// Read and process each sub-rectangle.
+	for i := uint32(0); i < numSubRects; i++ {
+		subRectColor := make([]byte, bytesPerPixel)
+		if _, err := io.ReadFull(c, subRectColor); err != nil {
+			return fmt.Errorf("rre: failed to read sub-rectangle color: %w", err)
 		}
 
-		x, err := ReadUint16(r)
-		if err != nil {
-			return err
+		var subRect Rectangle
+		if err := binary.Read(c, binary.BigEndian, &subRect); err != nil {
+			return fmt.Errorf("rre: failed to read sub-rectangle header: %w", err)
 		}
 
-		y, err := ReadUint16(r)
-		if err != nil {
-			return err
+		if clientConn.Canvas != nil {
+			// Adjust sub-rectangle position to be relative to the main canvas.
+			subRect.X += rect.X
+			subRect.Y += rect.Y
+			clientConn.Canvas.Fill(subRectColor, &subRect)
 		}
-
-		width, err := ReadUint16(r)
-		if err != nil {
-			return err
-		}
-		height, err := ReadUint16(r)
-		if err != nil {
-			return err
-		}
-		subRect := MakeRect(int(rect.X+x), int(rect.Y+y), int(width), int(height))
-		FillRect(enc.Image, &subRect, color)
 	}
 
 	return nil
 }
+
+// Reset does nothing as this encoding is stateless.
+func (e *RREEncoding) Reset() {}

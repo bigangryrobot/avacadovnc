@@ -4,15 +4,20 @@ import (
 	"bufio"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
+	"time"
 
-	"github.com/bhmj/vnc2video/logger"
+	"github.com/bigangryrobot/vnc2video/logger"
 )
 
 var (
-	// DefaultClientHandlers represents default client handlers
+	// DefaultClientHandlers is the default set of handlers for the VNC client handshake.
+	// These handlers are executed in sequence to negotiate the protocol version,
+	// security, and initial framebuffer state with the server.
 	DefaultClientHandlers = []Handler{
 		&DefaultClientVersionHandler{},
 		&DefaultClientSecurityHandler{},
@@ -22,38 +27,86 @@ var (
 	}
 )
 
-// Connect handshake with remote server using underlining net.Conn
+// Connect establishes a connection with a VNC server and performs the initial handshake.
+// It takes a context for cancellation, a network connection, and a client configuration.
+// On success, it returns a fully initialized ClientConn ready for interaction.
+// On failure, it returns an error and ensures the connection is closed.
 func Connect(ctx context.Context, c net.Conn, cfg *ClientConfig) (*ClientConn, error) {
+	// Set an initial deadline for the handshake process.
+	// This prevents a non-responsive server from holding the connection indefinitely.
+	c.SetDeadline(time.Now().Add(10 * time.Second))
+	defer c.SetDeadline(time.Time{}) // Clear the deadline after the handshake is done.
+
 	conn, err := NewClientConn(c, cfg)
 	if err != nil {
-		conn.Close()
-		cfg.ErrorCh <- err
-		return nil, err
+		return nil, fmt.Errorf("failed to create client connection: %w", err)
 	}
 
+	// Use default handlers if none are provided in the config.
 	if len(cfg.Handlers) == 0 {
 		cfg.Handlers = DefaultClientHandlers
 	}
 
+	// Execute the handshake handlers sequentially.
 	for _, h := range cfg.Handlers {
 		if err := h.Handle(conn); err != nil {
-			logger.Error("Handshake failed, check that server is running: ", err)
-			conn.Close()
-			cfg.ErrorCh <- err
-			return nil, err
+			conn.Close() // Ensure connection is closed on any handshake failure.
+			return nil, fmt.Errorf("handshake failed during handler %T: %w", h, err)
 		}
 	}
 
 	return conn, nil
 }
 
-var _ Conn = (*ClientConn)(nil)
+// ClientConn represents a client connection to a VNC server. It manages all
+// state and communication with the server, and implements the Conn interface.
+type ClientConn struct {
+	c        net.Conn
+	br       *bufio.Reader
+	bw       *bufio.Writer
+	cfg      *ClientConfig
+	protocol string
 
-// Config returns connection config
+	colorMap    ColorMap
+	Canvas      *VncCanvas
+	desktopName []byte
+	encodings   []Encoding
+
+	securityHandler SecurityHandler
+
+	fbHeight uint16
+	fbWidth  uint16
+
+	pixelFormat PixelFormat
+
+	quit   chan struct{}
+	wg     sync.WaitGroup
+	mu     sync.Mutex
+	closed bool
+}
+
+// NewClientConn creates a new, uninitialized client connection.
+func NewClientConn(c net.Conn, cfg *ClientConfig) (*ClientConn, error) {
+	if len(cfg.Encodings) == 0 {
+		return nil, errors.New("at least one encoding must be specified in the client config")
+	}
+	return &ClientConn{
+		c:           c,
+		cfg:         cfg,
+		br:          bufio.NewReader(c),
+		bw:          bufio.NewWriter(c),
+		encodings:   cfg.Encodings,
+		pixelFormat: cfg.PixelFormat,
+		quit:        make(chan struct{}),
+	}, nil
+}
+
+// Config returns the client configuration.
 func (c *ClientConn) Config() interface{} {
 	return c.cfg
 }
 
+// GetEncInstance returns the encoding instance for a given encoding type.
 func (c *ClientConn) GetEncInstance(typ EncodingType) Encoding {
 	for _, enc := range c.encodings {
 		if enc.Type() == typ {
@@ -63,291 +116,270 @@ func (c *ClientConn) GetEncInstance(typ EncodingType) Encoding {
 	return nil
 }
 
-// Wait waiting for connection close
+// Wait blocks until the connection is fully closed and all goroutines have exited.
 func (c *ClientConn) Wait() {
-	<-c.quit
+	c.wg.Wait()
 }
 
-// Conn return underlining net.Conn
+// Conn returns the underlying network connection.
 func (c *ClientConn) Conn() net.Conn {
 	return c.c
 }
 
-// SetProtoVersion sets proto version
+// SetProtoVersion sets the protocol version for the connection.
 func (c *ClientConn) SetProtoVersion(pv string) {
 	c.protocol = pv
 }
 
-// SetEncodings write SetEncodings message
+// SetEncodings sends a SetEncodings message to the server.
 func (c *ClientConn) SetEncodings(encs []EncodingType) error {
-
 	msg := &SetEncodings{
-		EncNum:    uint16(len(encs)),
 		Encodings: encs,
 	}
-
 	return msg.Write(c)
 }
 
-// Flush flushes data to conn
+// Flush writes any buffered data to the underlying connection.
 func (c *ClientConn) Flush() error {
 	return c.bw.Flush()
 }
 
-// Close closing conn
+// Close gracefully shuts down the client connection, stops all related goroutines,
+// and closes the underlying network connection. It is safe to call multiple times.
 func (c *ClientConn) Close() error {
-	if c.quit != nil {
-		close(c.quit)
-		c.quit = nil
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
 	}
-	if c.quitCh != nil {
-		close(c.quitCh)
-	}
-	return c.c.Close()
+	c.closed = true
+	c.mu.Unlock()
+
+	close(c.quit)
+	err := c.c.Close()
+	c.wg.Wait()
+	return err
 }
 
-// Read reads data from conn
+// Read reads data from the connection's buffered reader.
 func (c *ClientConn) Read(buf []byte) (int, error) {
 	return c.br.Read(buf)
 }
 
-// Write data to conn must be Flushed
+// Write writes data to the connection's buffered writer.
 func (c *ClientConn) Write(buf []byte) (int, error) {
 	return c.bw.Write(buf)
 }
 
-// ColorMap returns color map
+// ColorMap returns the color map for the connection.
 func (c *ClientConn) ColorMap() ColorMap {
 	return c.colorMap
 }
 
-// SetColorMap sets color map
+// SetColorMap sets the color map for the connection.
 func (c *ClientConn) SetColorMap(cm ColorMap) {
 	c.colorMap = cm
 }
 
-// DesktopName returns connection desktop name
+// DesktopName returns the desktop name of the remote session.
 func (c *ClientConn) DesktopName() []byte {
 	return c.desktopName
 }
 
-// PixelFormat returns connection pixel format
+// PixelFormat returns the pixel format of the connection.
 func (c *ClientConn) PixelFormat() PixelFormat {
 	return c.pixelFormat
 }
 
-// SetDesktopName sets desktop name
+// SetDesktopName sets the desktop name.
 func (c *ClientConn) SetDesktopName(name []byte) {
 	c.desktopName = name
 }
 
-// SetPixelFormat sets pixel format
+// SetPixelFormat sets the pixel format for the connection.
 func (c *ClientConn) SetPixelFormat(pf PixelFormat) error {
 	c.pixelFormat = pf
 	return nil
 }
 
-// Encodings returns client encodings
+// Encodings returns the list of supported encoding handlers.
 func (c *ClientConn) Encodings() []Encoding {
 	return c.encodings
 }
 
-// Width returns width
+// Width returns the framebuffer width.
 func (c *ClientConn) Width() uint16 {
 	return c.fbWidth
 }
 
-// Height returns height
+// Height returns the framebuffer height.
 func (c *ClientConn) Height() uint16 {
 	return c.fbHeight
 }
 
-// Protocol returns protocol
+// Protocol returns the negotiated VNC protocol version.
 func (c *ClientConn) Protocol() string {
 	return c.protocol
 }
 
-// SetWidth sets width of client conn
+// SetWidth sets the framebuffer width.
 func (c *ClientConn) SetWidth(width uint16) {
 	c.fbWidth = width
 }
 
-// SetHeight sets height of client conn
+// SetHeight sets the framebuffer height.
 func (c *ClientConn) SetHeight(height uint16) {
 	c.fbHeight = height
 }
 
-// SecurityHandler returns security handler
+// SecurityHandler returns the security handler for the connection.
 func (c *ClientConn) SecurityHandler() SecurityHandler {
 	return c.securityHandler
 }
 
-// SetSecurityHandler sets security handler
+// SetSecurityHandler sets the security handler.
 func (c *ClientConn) SetSecurityHandler(sechandler SecurityHandler) error {
 	c.securityHandler = sechandler
 	return nil
 }
 
-// The ClientConn type holds client connection information
-type ClientConn struct {
-	c        net.Conn
-	br       *bufio.Reader
-	bw       *bufio.Writer
-	cfg      *ClientConfig
-	protocol string
-	// If the pixel format uses a color map, then this is the color
-	// map that is used. This should not be modified directly, since
-	// the data comes from the server.
-	// Definition in §5 - Representation of Pixel Data.
-	colorMap ColorMap
-	Canvas   *VncCanvas
-	// Name associated with the desktop, sent from the server.
-	desktopName []byte
-
-	// Encodings supported by the client. This should not be modified
-	// directly. Instead, SetEncodings() should be used.
-	encodings []Encoding
-
-	securityHandler SecurityHandler
-
-	// Height of the frame buffer in pixels, sent from the server.
-	fbHeight uint16
-
-	// Width of the frame buffer in pixels, sent from the server.
-	fbWidth uint16
-
-	// The pixel format associated with the connection. This shouldn't
-	// be modified. If you wish to set a new pixel format, use the
-	// SetPixelFormat method.
-	pixelFormat PixelFormat
-
-	quitCh  chan struct{}
-	quit    chan struct{}
-	errorCh chan error
-}
-
-func (cc *ClientConn) ResetAllEncodings() {
-	for _, enc := range cc.encodings {
+// ResetAllEncodings resets the internal state of all supported encoding handlers.
+func (c *ClientConn) ResetAllEncodings() {
+	for _, enc := range c.encodings {
 		enc.Reset()
 	}
 }
 
-// NewClientConn creates new client conn using config
-func NewClientConn(c net.Conn, cfg *ClientConfig) (*ClientConn, error) {
-	if len(cfg.Encodings) == 0 {
-		return nil, fmt.Errorf("client can't handle encodings")
-	}
-	return &ClientConn{
-		c:           c,
-		cfg:         cfg,
-		br:          bufio.NewReader(c),
-		bw:          bufio.NewWriter(c),
-		encodings:   cfg.Encodings,
-		quitCh:      cfg.QuitCh,
-		errorCh:     cfg.ErrorCh,
-		pixelFormat: cfg.PixelFormat,
-		quit:        make(chan struct{}),
-	}, nil
-}
-
-// DefaultClientMessageHandler represents default client message handler
+// DefaultClientMessageHandler is the default handler for processing server messages
+// after the handshake is complete. It starts the main message handling loops.
 type DefaultClientMessageHandler struct{}
 
-// Handle handles server messages.
+// Handle starts the message handling loops for the client.
 func (*DefaultClientMessageHandler) Handle(c Conn) error {
 	logger.Trace("starting DefaultClientMessageHandler")
-	cfg := c.Config().(*ClientConfig)
-	var err error
-	var wg sync.WaitGroup
-	wg.Add(2)
-	//defer c.Close()
+	clientConn, ok := c.(*ClientConn)
+	if !ok {
+		return errors.New("handler expected a *ClientConn")
+	}
+	cfg := clientConn.cfg
 
+	// Create a map of server message types to their handlers for quick lookup.
 	serverMessages := make(map[ServerMessageType]ServerMessage)
 	for _, m := range cfg.Messages {
 		serverMessages[m.Type()] = m
 	}
 
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case msg := <-cfg.ClientMessageCh:
-				if err = msg.Write(c); err != nil {
-					cfg.ErrorCh <- err
-					return
-				}
-			}
-		}
-	}()
+	// Start the goroutines for handling incoming and outgoing messages.
+	clientConn.wg.Add(2)
+	go clientConn.handleIncomingMessages(serverMessages)
+	go clientConn.handleOutgoingMessages()
 
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			default:
-				var messageType ServerMessageType
-				if err = binary.Read(c, binary.BigEndian, &messageType); err != nil {
-					cfg.ErrorCh <- err
-					return
-				}
-				logger.Infof("========got server message, msgType=%d", messageType)
-				msg, ok := serverMessages[messageType]
-				if !ok {
-					err = fmt.Errorf("unknown message-type: %v", messageType)
-					cfg.ErrorCh <- err
-					return
-				}
-				canvas := c.(*ClientConn).Canvas
-				canvas.RemoveCursor()
-				parsedMsg, err := msg.Read(c)
-				canvas.PaintCursor()
-				//canvas.SwapBuffers()
-				logger.Debugf("============== End Message: type=%d ==============", messageType)
-
-				if err != nil {
-					cfg.ErrorCh <- err
-					return
-				}
-				cfg.ServerMessageCh <- parsedMsg
-			}
-		}
-	}()
-	//encodings := c.Encodings()
-	encTypes := make(map[EncodingType]EncodingType)
-	for _, myEnc := range c.Encodings() {
-		encTypes[myEnc.Type()] = myEnc.Type()
-		//encTypes = append(encTypes, myEnc.Type())
+	// Set the client's supported encodings on the server.
+	var encTypes []EncodingType
+	for _, enc := range clientConn.Encodings() {
+		encTypes = append(encTypes, enc.Type())
 	}
-	v := make([]EncodingType, 0, len(encTypes))
-
-	for _, value := range encTypes {
-		v = append(v, value)
+	logger.Tracef("setting encodings: %v", encTypes)
+	if err := clientConn.SetEncodings(encTypes); err != nil {
+		return fmt.Errorf("failed to set encodings: %w", err)
 	}
-	logger.Tracef("setting encodings: %v", v)
-	c.SetEncodings(v)
 
-	firstMsg := FramebufferUpdateRequest{Inc: 0, X: 0, Y: 0, Width: c.Width(), Height: c.Height()}
-	logger.Tracef("sending initial req message: %v", firstMsg)
-	firstMsg.Write(c)
-
-	//wg.Wait()
-	return nil
+	// Send the initial framebuffer update request.
+	req := FramebufferUpdateRequest{
+		Inc:    1, // Request an incremental update.
+		X:      0,
+		Y:      0,
+		Width:  clientConn.Width(),
+		Height: clientConn.Height(),
+	}
+	logger.Tracef("sending initial framebuffer update request: %+v", req)
+	return req.Write(clientConn)
 }
 
-// A ClientConfig structure is used to configure a ClientConn. After
-// one has been passed to initialize a connection, it must not be modified.
-type ClientConfig struct {
-	Handlers         []Handler
-	SecurityHandlers []SecurityHandler
-	Encodings        []Encoding
-	PixelFormat      PixelFormat
-	ColorMap         ColorMap
-	ClientMessageCh  chan ClientMessage
-	ServerMessageCh  chan ServerMessage
-	Exclusive        bool
-	DrawCursor       bool
-	Messages         []ServerMessage
-	QuitCh           chan struct{}
-	ErrorCh          chan error
-	quit             chan struct{}
+// handleIncomingMessages runs in a dedicated goroutine, reading and processing
+// messages from the server.
+func (c *ClientConn) handleIncomingMessages(serverMessages map[ServerMessageType]ServerMessage) {
+	defer c.wg.Done()
+	defer c.Close() // Ensure connection is closed if this loop exits.
+
+	for {
+		// Set a read deadline to detect idle or hung connections.
+		// The deadline is extended each time a message is successfully read.
+		c.c.SetReadDeadline(time.Now().Add(30 * time.Second))
+
+		// Check for quit signal without blocking.
+		select {
+		case <-c.quit:
+			return
+		default:
+		}
+
+		var msgType ServerMessageType
+		if err := binary.Read(c, binary.BigEndian, &msgType); err != nil {
+			// A read error, often io.EOF, means the connection is closed.
+			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+				logger.Errorf("error reading message type: %v", err)
+			}
+			return
+		}
+
+		msg, ok := serverMessages[msgType]
+		if !ok {
+			// Include the remote address for easier debugging of client issues.
+			logger.Errorf("unsupported message type %d from server %s", msgType, c.c.RemoteAddr())
+			return // Unknown message type is a fatal error.
+		}
+
+		if c.Canvas != nil {
+			c.Canvas.RemoveCursor()
+		}
+
+		parsedMsg, err := msg.Read(c)
+		if err != nil {
+			logger.Errorf("error reading message body for type %d: %v", msgType, err)
+			return
+		}
+
+		if c.Canvas != nil {
+			c.Canvas.PaintCursor()
+		}
+
+		// Send the parsed message to the application logic.
+		select {
+		case c.cfg.ServerMessageCh <- parsedMsg:
+		case <-c.quit:
+			return
+		}
+	}
+}
+
+// handleOutgoingMessages runs in a dedicated goroutine, sending messages
+// from the client to the server.
+func (c *ClientConn) handleOutgoingMessages() {
+	defer c.wg.Done()
+
+	for {
+		select {
+		case msg, ok := <-c.cfg.ClientMessageCh:
+			if !ok {
+				// Channel closed, which is a signal to shut down.
+				return
+			}
+			if err := msg.Write(c); err != nil {
+				if !errors.Is(err, net.ErrClosed) {
+					logger.Errorf("error writing message: %v", err)
+				}
+				c.Close()
+				return
+			}
+			if err := c.Flush(); err != nil {
+				if !errors.Is(err, net.ErrClosed) {
+					logger.Errorf("error flushing writer: %v", err)
+				}
+				return
+			}
+		case <-c.quit:
+			return
+		}
+	}
 }

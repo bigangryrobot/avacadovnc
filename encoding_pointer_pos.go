@@ -1,41 +1,43 @@
 package vnc2video
 
 import (
-	"image"
-	"image/draw"
-
-	"github.com/bhmj/vnc2video/logger"
+	"fmt"
 )
 
-type CursorPosPseudoEncoding struct {
-	prevPosBackup    draw.Image
-	prevPositionRect image.Rectangle
-	cursorImage      draw.Image
-	Image            draw.Image
+// PointerPosEncoding implements the PointerPos pseudo-encoding.
+// This is not a true encoding but a message from the server to update the
+// client-side position of the mouse cursor.
+type PointerPosEncoding struct{}
+
+// Type returns the encoding type identifier.
+func (e *PointerPosEncoding) Type() EncodingType {
+	return EncPointerPos
 }
 
-func (*CursorPosPseudoEncoding) Supported(Conn) bool {
-	return true
-}
+// Read handles the cursor position update. The new coordinates are in the
+// rectangle header's X and Y fields.
+func (e *PointerPosEncoding) Read(c Conn, rect *Rectangle) error {
+	// The new cursor position is sent in the X and Y fields of the rectangle header.
+	newX := rect.X
+	newY := rect.Y
 
-func (enc *CursorPosPseudoEncoding) SetTargetImage(img draw.Image) {
-	enc.Image = img
-}
+	// Get the client connection to access its canvas.
+	clientConn, ok := c.(*ClientConn)
+	if !ok {
+		// This encoding is only valid for clients.
+		return fmt.Errorf("pointer-pos: connection is not a client connection")
+	}
 
-func (enc *CursorPosPseudoEncoding) Reset() error {
+	if clientConn.Canvas == nil {
+		// No canvas to update, so we can ignore this message.
+		return nil
+	}
+
+	// Update the cursor's location on the canvas.
+	clientConn.Canvas.MoveCursor(int(newX), int(newY))
+
 	return nil
 }
 
-func (*CursorPosPseudoEncoding) Type() EncodingType { return EncPointerPosPseudo }
-
-func (enc *CursorPosPseudoEncoding) Read(c Conn, rect *Rectangle) error {
-	logger.Tracef("CursorPosPseudoEncoding: got cursot pos update: %v", rect)
-	canvas := enc.Image.(*VncCanvas)
-	canvas.CursorLocation = &image.Point{X: int(rect.X), Y: int(rect.Y)}
-	return nil
-}
-
-func (enc *CursorPosPseudoEncoding) Write(c Conn, rect *Rectangle) error {
-
-	return nil
-}
+// Reset does nothing as this encoding is stateless.
+func (e *PointerPosEncoding) Reset() {}

@@ -2,243 +2,77 @@ package vnc2video
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
-	"image"
 	"image/color"
-	"image/draw"
 	"io"
 )
 
-const (
-	BlockWidth  = 16
-	BlockHeight = 16
-)
-
-type VncCanvas struct {
-	draw.Image
-	//DisplayBuff draw.Image
-	//WriteBuff      draw.Image
-	imageBuffs     [2]draw.Image
-	Cursor         draw.Image
-	CursorMask     [][]bool
-	CursorBackup   draw.Image
-	CursorOffset   *image.Point
-	CursorLocation *image.Point
-	DrawCursor     bool
-	Changed        map[string]bool
-}
-
-func NewVncCanvas(width, height int) *VncCanvas {
-	//dispImg := NewRGBImage(image.Rect(0, 0, width, height))
-	writeImg := NewRGBImage(image.Rect(0, 0, width, height))
-	canvas := VncCanvas{
-		Image: writeImg,
-		//DisplayBuff: dispImg,
-		//WriteBuff:   writeImg,
-	}
-	return &canvas
-}
-
-func (c *VncCanvas) SetChanged(rect *Rectangle) {
-	if c.Changed == nil {
-		c.Changed = make(map[string]bool)
-	}
-	for x := int(rect.X) / BlockWidth; x*BlockWidth < int(rect.X+rect.Width); x++ {
-		for y := int(rect.Y) / BlockHeight; y*BlockHeight < int(rect.Y+rect.Height); y++ {
-			key := fmt.Sprintf("%d,%d", x, y)
-			//fmt.Println("setting block: ", key)
-			c.Changed[key] = true
-		}
-	}
-}
-
-func (c *VncCanvas) Reset(rect *Rectangle) {
-	c.Changed = nil
-}
-
-func (c *VncCanvas) RemoveCursor() image.Image {
-	if c.Cursor == nil || c.CursorLocation == nil {
-		return c.Image
-	}
-	if !c.DrawCursor {
-		return c.Image
-	}
-	rect := c.Cursor.Bounds()
-	loc := c.CursorLocation
-	img := c.Image
-	for y := rect.Min.Y; y < int(rect.Max.Y); y++ {
-		for x := rect.Min.X; x < int(rect.Max.X); x++ {
-			// offset := y*int(rect.Width) + x
-			// if bitmask[y*int(scanLine)+x/8]&(1<<uint(7-x%8)) > 0 {
-			col := c.CursorBackup.At(x, y)
-			//mask := c.CursorMask.At(x, y).(color.RGBA)
-			mask := c.CursorMask[x][y]
-			//logger.Info("Drawing Cursor: ", x, y, col, mask)
-			if mask {
-				//logger.Info("Drawing Cursor for real: ", x, y, col)
-				img.Set(x+loc.X-c.CursorOffset.X, y+loc.Y-c.CursorOffset.Y, col)
-			}
-			// 	//logger.Tracef("CursorPseudoEncoding.Read: setting pixel: (%d,%d) %v", x+int(rect.X), y+int(rect.Y), colors[offset])
-			// }
-		}
-	}
-	return img
-}
-
-// func (c *VncCanvas) SwapBuffers() {
-// 	swapSpace := c.DisplayBuff
-// 	c.DisplayBuff = c.WriteBuff
-// 	c.WriteBuff = swapSpace
-// 	c.Image = c.WriteBuff
-// }
-
-func (c *VncCanvas) PaintCursor() image.Image {
-	if c.Cursor == nil || c.CursorLocation == nil {
-		return c.Image
-	}
-	if !c.DrawCursor {
-		return c.Image
-	}
-	rect := c.Cursor.Bounds()
-	if c.CursorBackup == nil {
-		c.CursorBackup = image.NewRGBA(c.Cursor.Bounds())
-	}
-
-	loc := c.CursorLocation
-	img := c.Image
-	for y := rect.Min.Y; y < int(rect.Max.Y); y++ {
-		for x := rect.Min.X; x < int(rect.Max.X); x++ {
-			// offset := y*int(rect.Width) + x
-			// if bitmask[y*int(scanLine)+x/8]&(1<<uint(7-x%8)) > 0 {
-			col := c.Cursor.At(x, y)
-			//mask := c.CursorMask.At(x, y).(RGBColor)
-			mask := c.CursorMask[x][y]
-			backup := c.Image.At(x+loc.X-c.CursorOffset.X, y+loc.Y-c.CursorOffset.Y)
-			//c.CursorBackup.Set(x, y, backup)
-			//backup the previous data at this point
-
-			//logger.Info("Drawing Cursor: ", x, y, col, mask)
-			if mask {
-
-				c.CursorBackup.Set(x, y, backup)
-				//logger.Info("Drawing Cursor for real: ", x, y, col)
-				img.Set(x+loc.X-c.CursorOffset.X, y+loc.Y-c.CursorOffset.Y, col)
-			}
-			// 	//logger.Tracef("CursorPseudoEncoding.Read: setting pixel: (%d,%d) %v", x+int(rect.X), y+int(rect.Y), colors[offset])
-			// }
-		}
-	}
-	return img
-}
-
-func Min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func DrawImage(target draw.Image, imageToApply image.Image, pos image.Point) {
-	rect := imageToApply.Bounds()
-	for x := rect.Min.X; x < rect.Max.X; x++ {
-		for y := rect.Min.Y; y < rect.Max.Y; y++ {
-			target.Set(x+pos.X, y+pos.Y, imageToApply.At(x, y))
-		}
-	}
-}
-
-func FillRect(img draw.Image, rect *image.Rectangle, c color.Color) {
-	for x := rect.Min.X; x < rect.Max.X; x++ {
-		for y := rect.Min.Y; y < rect.Max.Y; y++ {
-			img.Set(x, y, c)
-		}
-	}
-}
-
-// Read unmarshal color from conn
-func ReadColor(c io.Reader, pf *PixelFormat) (*color.RGBA, error) {
-	if pf.TrueColor == 0 {
-		return nil, errors.New("support for non true color formats was not implemented")
-	}
-	order := pf.order()
-	var pixel uint32
+// ReadPixel reads the raw bytes for a single pixel from the reader based on the
+// connection's pixel format and returns them packed into a uint32.
+// This function handles different bytes-per-pixel (BPP) values and endianness,
+// providing a normalized format for further processing.
+func ReadPixel(r io.Reader, pf *PixelFormat) (uint32, error) {
+	var px uint32
+	order := pixelOrder(pf)
 
 	switch pf.BPP {
 	case 8:
-		var px uint8
-		if err := binary.Read(c, order, &px); err != nil {
-			return nil, err
+		var px8 uint8
+		if err := binary.Read(r, order, &px8); err != nil {
+			return 0, fmt.Errorf("failed to read 8-bit pixel: %w", err)
 		}
-		pixel = uint32(px)
+		px = uint32(px8)
 	case 16:
-		var px uint16
-		if err := binary.Read(c, order, &px); err != nil {
-			return nil, err
+		var px16 uint16
+		if err := binary.Read(r, order, &px16); err != nil {
+			return 0, fmt.Errorf("failed to read 16-bit pixel: %w", err)
 		}
-		pixel = uint32(px)
+		px = uint32(px16)
 	case 32:
-		var px uint32
-		if err := binary.Read(c, order, &px); err != nil {
-			return nil, err
+		var px32 uint32
+		if err := binary.Read(r, order, &px32); err != nil {
+			return 0, fmt.Errorf("failed to read 32-bit pixel: %w", err)
 		}
-		pixel = uint32(px)
+		px = px32
+	default:
+		return 0, fmt.Errorf("unsupported BPP: %d", pf.BPP)
 	}
-
-	rgb := color.RGBA{
-		R: uint8((pixel >> pf.RedShift) & uint32(pf.RedMax)),
-		G: uint8((pixel >> pf.GreenShift) & uint32(pf.GreenMax)),
-		B: uint8((pixel >> pf.BlueShift) & uint32(pf.BlueMax)),
-		A: 1,
-	}
-
-	return &rgb, nil
+	return px, nil
 }
 
-func DecodeRaw(reader io.Reader, pf *PixelFormat, rect *Rectangle, targetImage draw.Image) error {
-	for y := 0; y < int(rect.Height); y++ {
-		for x := 0; x < int(rect.Width); x++ {
-			col, err := ReadColor(reader, pf)
-			if err != nil {
-				return err
-			}
-
-			targetImage.(draw.Image).Set(int(rect.X)+x, int(rect.Y)+y, col)
+// PixelToRGBA converts a raw pixel value (packed in a uint32) to an RGBA color,
+// according to the given pixel format and color map. This is the core of color
+// translation in the VNC client.
+func PixelToRGBA(pixel uint32, pf *PixelFormat, cm *ColorMap) color.RGBA {
+	if pf.TrueColor == 0 {
+		// Paletted color. The pixel value is an index into the color map.
+		if cm != nil && pixel < uint32(len(cm)) {
+			return cm[pixel]
 		}
+		// Fallback if color map is missing or index is out of bounds.
+		// This shouldn't happen in a valid VNC session.
+		return color.RGBA{R: 0, G: 0, B: 0, A: 255}
 	}
 
-	return nil
+	// True color. Extract R, G, B components using bit shifts and masks.
+	red := (pixel >> pf.RedShift) & uint32(pf.RedMax)
+	green := (pixel >> pf.GreenShift) & uint32(pf.GreenMax)
+	blue := (pixel >> pf.BlueShift) & uint32(pf.BlueMax)
+
+	// Scale the components to the full 0-255 range.
+	// This is crucial for correctly displaying colors with depths less than 24-bit
+	// (e.g., 16-bit color, where RedMax might be 31).
+	r := uint8((float64(red) * 255.0) / float64(pf.RedMax))
+	g := uint8((float64(green) * 255.0) / float64(pf.GreenMax))
+	b := uint8((float64(blue) * 255.0) / float64(pf.BlueMax))
+
+	return color.RGBA{R: r, G: g, B: b, A: 255}
 }
 
-func ReadUint8(r io.Reader) (uint8, error) {
-	var myUint uint8
-	if err := binary.Read(r, binary.BigEndian, &myUint); err != nil {
-		return 0, err
+// pixelOrder is a helper function to determine the byte order from a PixelFormat.
+func pixelOrder(pf *PixelFormat) binary.ByteOrder {
+	if pf.BigEndian != 0 {
+		return binary.BigEndian
 	}
-
-	return myUint, nil
-}
-func ReadUint16(r io.Reader) (uint16, error) {
-	var myUint uint16
-	if err := binary.Read(r, binary.BigEndian, &myUint); err != nil {
-		return 0, err
-	}
-
-	return myUint, nil
-}
-
-func ReadUint32(r io.Reader) (uint32, error) {
-	var myUint uint32
-	if err := binary.Read(r, binary.BigEndian, &myUint); err != nil {
-		return 0, err
-	}
-
-	return myUint, nil
-}
-
-func MakeRect(x, y, width, height int) image.Rectangle {
-	return image.Rectangle{Min: image.Point{X: x, Y: y}, Max: image.Point{X: x + width, Y: y + height}}
-}
-func MakeRectFromVncRect(rect *Rectangle) image.Rectangle {
-	return MakeRect(int(rect.X), int(rect.Y), int(rect.Width), int(rect.Height))
+	return binary.LittleEndian
 }

@@ -2,184 +2,171 @@ package main
 
 import (
 	"context"
+	"flag"
+	"fmt"
+	"image"
+	"image/png"
 	"log"
 	"net"
 	"os"
 	"os/signal"
-	"runtime"
-	"runtime/pprof"
 	"syscall"
 	"time"
 
-	vnc "github.com/bhmj/vnc2video"
-	"github.com/bhmj/vnc2video/encoders"
-	"github.com/bhmj/vnc2video/logger"
+	vnc "github.com/bigangryrobot/vnc2video"
+	"github.com/bigangryrobot/vnc2video/logger"
 )
 
 func main() {
-	runtime.GOMAXPROCS(4)
-	framerate := 25
-	runWithProfiler := false
+	// --- Command-line flags ---
+	var host, password string
+	var port int
+	flag.StringVar(&host, "host", "127.0.0.1", "VNC server host")
+	flag.IntVar(&port, "port", 5900, "VNC server port")
+	flag.StringVar(&password, "password", "", "VNC server password")
+	flag.Parse()
 
-	// Establish TCP connection to VNC server.
-	nc, err := net.DialTimeout("tcp", os.Args[1], 5*time.Second)
-	if err != nil {
-		logger.Fatalf("Error connecting to VNC host. %v", err)
-	}
+	addr := fmt.Sprintf("%s:%d", host, port)
+	logger.Infof("Connecting to VNC server at %s", addr)
 
-	logger.Tracef("starting up the client, connecting to: %s", os.Args[1])
-	// Negotiate connection with the server.
-	cchServer := make(chan vnc.ServerMessage)
-	cchClient := make(chan vnc.ClientMessage)
-	errorCh := make(chan error)
+	// --- VNC Client Configuration ---
+	// The message channels are used to communicate between the main application
+	// logic and the connection's message handling goroutines.
+	clientCh := make(chan vnc.ClientMessage, 10)
+	serverCh := make(chan vnc.ServerMessage, 10)
 
-	ccfg := &vnc.ClientConfig{
+	cfg := &vnc.ClientConfig{
 		SecurityHandlers: []vnc.SecurityHandler{
-			//&vnc.ClientAuthATEN{Username: []byte(os.Args[2]), Password: []byte(os.Args[3])}
-			//&vnc.ClientAuthVNC{Password: []byte("12345")},
-			&vnc.ClientAuthNone{},
+			&vnc.SecurityNone{},
 		},
-		DrawCursor:      true,
-		PixelFormat:     vnc.PixelFormat32bit,
-		ClientMessageCh: cchClient,
-		ServerMessageCh: cchServer,
-		Messages:        vnc.DefaultServerMessages,
 		Encodings: []vnc.Encoding{
 			&vnc.RawEncoding{},
-			&vnc.TightEncoding{},
-			&vnc.HextileEncoding{},
-			&vnc.ZRLEEncoding{},
 			&vnc.CopyRectEncoding{},
-			&vnc.CursorPseudoEncoding{},
-			&vnc.CursorPosPseudoEncoding{},
-			&vnc.ZLibEncoding{},
+			&vnc.TightEncoding{},
+			&vnc.ZlibEncoding{},
 			&vnc.RREEncoding{},
+			&vnc.HextileEncoding{},
+			// Pseudo-encodings handle events like desktop resizes and cursor updates.
+			// The library uses these to manage the canvas state automatically.
+			&vnc.DesktopSizeEncoding{},
+			&vnc.CursorEncoding{},
 		},
-		ErrorCh: errorCh,
+		PixelFormat:     vnc.DefaultPixelFormat,
+		ClientMessageCh: clientCh,
+		ServerMessageCh: serverCh,
+		Messages: []vnc.ServerMessage{
+			&vnc.FramebufferUpdateMessage{},
+			&vnc.SetColourMapEntriesMessage{},
+			&vnc.ServerBellMessage{},
+			&vnc.ServerCutTextMessage{},
+		},
+		DrawCursor: true, // Tell the canvas to render the mouse pointer.
 	}
 
-	cc, err := vnc.Connect(context.Background(), nc, ccfg)
-	screenImage := cc.Canvas
+	// --- Connection ---
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
-		logger.Fatalf("Error negotiating connection to VNC host. %v", err)
+		log.Fatalf("Failed to connect to VNC server: %v", err)
 	}
-	// out, err := os.Create("./output" + strconv.Itoa(counter) + ".jpg")
-	// if err != nil {
-	// 	fmt.Println(err)p
-	// 	os.Exit(1)
-	// }
-	//vcodec := &encoders.MJPegImageEncoder{Quality: 60 , Framerate: framerate}
-	//vcodec := &encoders.X264ImageEncoder{FFMpegBinPath: "./ffmpeg", Framerate: framerate}
-	//vcodec := &encoders.HuffYuvImageEncoder{FFMpegBinPath: "./ffmpeg", Framerate: framerate}
-	vcodec := &encoders.QTRLEImageEncoder{FFMpegBinPath: "ffmpeg", Framerate: framerate}
-	//vcodec := &encoders.VP8ImageEncoder{FFMpegBinPath:"./ffmpeg", Framerate: framerate}
-	//vcodec := &encoders.DV9ImageEncoder{FFMpegBinPath:"./ffmpeg", Framerate: framerate}
 
-	//counter := 0
-	//vcodec.Init("./output" + strconv.Itoa(counter))
+	// The Connect function performs the VNC handshake.
+	clientConn, err := vnc.Connect(context.Background(), conn, cfg)
+	if err != nil {
+		log.Fatalf("VNC handshake failed: %v", err)
+	}
+	defer clientConn.Close()
 
-	go vcodec.Run("./output.mp4")
-	//windows
-	///go vcodec.Run("/Users/amitbet/Dropbox/go/src/vnc2webm/example/file-reader/ffmpeg", "./output.mp4")
+	logger.Info("VNC connection established successfully.")
 
-	//go vcodec.Run("C:\\Users\\betzalel\\Dropbox\\go\\src\\vnc2video\\example\\client\\ffmpeg.exe", "output.mp4")
-	//vcodec.Run("./output")
+	// --- Canvas and Frame Processing ---
+	// The VncCanvas holds the state of the remote framebuffer.
+	// It's initialized with the dimensions received during the handshake.
+	canvas := vnc.NewVncCanvas(
+		int(clientConn.Width()),
+		int(clientConn.Height()),
+		clientConn.PixelFormat(),
+	)
+	// The client connection needs a reference to the canvas to draw updates.
+	clientConn.Canvas = canvas
 
-	// var out *os.File
+	// --- Main Event Loop ---
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	logger.Tracef("connected to: %s", os.Args[1])
-	defer cc.Close()
-
-	cc.SetEncodings([]vnc.EncodingType{
-		vnc.EncCursorPseudo,
-		vnc.EncPointerPosPseudo,
-		vnc.EncCopyRect,
-		vnc.EncTight,
-		vnc.EncZRLE,
-		//vnc.EncHextile,
-		//vnc.EncZlib,
-		//vnc.EncRRE,
-	})
-	//rect := image.Rect(0, 0, int(cc.Width()), int(cc.Height()))
-	//screenImage := image.NewRGBA64(rect)
-	// Process messages coming in on the ServerMessage channel.
-
+	// Handle graceful shutdown on interrupt signals.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		for {
-			timeStart := time.Now()
-
-			vcodec.Encode(screenImage.Image)
-
-			timeTarget := timeStart.Add((1000 / time.Duration(framerate)) * time.Millisecond)
-			timeLeft := timeTarget.Sub(time.Now())
-			if timeLeft > 0 {
-				time.Sleep(timeLeft)
-			}
-		}
+		<-sigCh
+		logger.Info("Interrupt signal received, shutting down.")
+		cancel()
 	}()
 
-	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc,
-		syscall.SIGHUP,
-		syscall.SIGINT,
-		syscall.SIGTERM,
-		syscall.SIGQUIT)
-	frameBufferReq := 0
-	timeStart := time.Now()
-
-	if runWithProfiler {
-		profFile := "prof.file"
-		f, err := os.Create(profFile)
-		if err != nil {
-			log.Fatal(err)
-		}
-		pprof.StartCPUProfile(f)
-		defer pprof.StopCPUProfile()
+	// Start by requesting the first full framebuffer update.
+	// Subsequent requests will be for incremental updates.
+	clientCh <- &vnc.FramebufferUpdateRequest{
+		Inc:    0, // 0 = full update, 1 = incremental
+		X:      0,
+		Y:      0,
+		Width:  clientConn.Width(),
+		Height: clientConn.Height(),
 	}
 
-	timer := time.NewTimer(10 * time.Second)
-
-outer:
+	frameCount := 0
 	for {
 		select {
-		case err := <-errorCh:
-			panic(err)
-		case msg := <-cchClient:
-			logger.Tracef("Received client message type:%v msg:%v\n", msg.Type(), msg)
-		case msg := <-cchServer:
-			//logger.Tracef("Received server message type:%v msg:%v\n", msg.Type(), msg)
+		case <-ctx.Done():
+			return
 
-			// out, err := os.Create("./output" + strconv.Itoa(counter) + ".jpg")
-			// if err != nil {
-			// 	fmt.Println(err)
-			// 	os.Exit(1)
-			// }
-
-			if msg.Type() == vnc.FramebufferUpdateMsgType {
-				secsPassed := time.Now().Sub(timeStart).Seconds()
-				frameBufferReq++
-				reqPerSec := float64(frameBufferReq) / secsPassed
-				//counter++
-				//jpeg.Encode(out, screenImage, nil)
-				///vcodec.Encode(screenImage)
-				logger.Infof("reqs=%d, seconds=%f, Req Per second= %f", frameBufferReq, secsPassed, reqPerSec)
-
-				reqMsg := vnc.FramebufferUpdateRequest{Inc: 1, X: 0, Y: 0, Width: cc.Width(), Height: cc.Height()}
-				//cc.ResetAllEncodings()
-				reqMsg.Write(cc)
+		case msg, ok := <-serverCh:
+			if !ok {
+				logger.Info("Server channel closed, exiting.")
+				return
 			}
-		case signal := <-sigc:
-			if signal != nil {
-				break outer
+
+			switch msg.(type) {
+			case *vnc.FramebufferUpdateMessage:
+				saveFrame(canvas, frameCount)
+				frameCount++
+
+				// Wait a moment before requesting the next frame to avoid flooding the server.
+				time.Sleep(100 * time.Millisecond)
+
+				// Request the next incremental update.
+				clientCh <- &vnc.FramebufferUpdateRequest{
+					Inc:    1,
+					X:      0,
+					Y:      0,
+					Width:  clientConn.Width(),
+					Height: clientConn.Height(),
+				}
 			}
-		case <-timer.C:
-			break outer
 		}
 	}
+}
 
-	vcodec.Close()
-	pprof.StopCPUProfile()
-	time.Sleep(2 * time.Second)
-	os.Exit(1)
-	//cc.Wait()
+// saveFrame saves the current state of the VncCanvas to a PNG file.
+func saveFrame(canvas *vnc.VncCanvas, frameIndex int) {
+	bounds := image.Rect(0, 0, canvas.Width(), canvas.Height())
+	img := image.NewRGBA(bounds)
+
+	// The canvas's Draw method renders its current state onto our image.
+	canvas.Draw(img, &vnc.Rectangle{
+		X: 0, Y: 0, Width: uint16(bounds.Dx()), Height: uint16(bounds.Dy()),
+	})
+
+	fileName := fmt.Sprintf("frame-%05d.png", frameIndex)
+	file, err := os.Create(fileName)
+	if err != nil {
+		logger.Errorf("Failed to create file %s: %v", fileName, err)
+		return
+	}
+	defer file.Close()
+
+	if err := png.Encode(file, img); err != nil {
+		logger.Errorf("Failed to encode PNG %s: %v", fileName, err)
+		return
+	}
+
+	logger.Infof("Saved frame: %s", fileName)
 }

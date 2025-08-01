@@ -2,9 +2,6 @@ package vnc2video
 
 import "fmt"
 
-// Key represents a VNC key press.
-type Key uint32
-
 //go:generate stringer -type=Key
 
 // Keys is a slice of Key values.

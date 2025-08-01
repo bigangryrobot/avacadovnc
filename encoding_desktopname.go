@@ -1,41 +1,35 @@
-package vnc2video
+package avacadovnc
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"fmt"
+	"io"
+)
 
-// DesktopNamePseudoEncoding represents a desktop size message from the server.
-type DesktopNamePseudoEncoding struct {
-	Name []byte
+// DesktopNameEncoding implements the DesktopName pseudo-encoding, which is used
+// by the server to update the client with the session's name.
+type DesktopNameEncoding struct{}
+
+// Type returns the encoding type identifier.
+func (e *DesktopNameEncoding) Type() EncodingType {
+	return EncDesktopName
 }
 
-func (*DesktopNamePseudoEncoding) Supported(Conn) bool {
-	return true
-}
-func (*DesktopNamePseudoEncoding) Reset() error {
+// Read decodes the desktop name data.
+func (e *DesktopNameEncoding) Read(c Conn, rect *Rectangle) error {
+	var nameLength uint32
+	if err := binary.Read(c, binary.BigEndian, &nameLength); err != nil {
+		return fmt.Errorf("desktop-name: failed to read name length: %w", err)
+	}
+
+	name := make([]byte, nameLength)
+	if _, err := io.ReadFull(c, name); err != nil {
+		return fmt.Errorf("desktop-name: failed to read name: %w", err)
+	}
+
+	c.SetDesktopName(name)
 	return nil
 }
-func (*DesktopNamePseudoEncoding) Type() EncodingType { return EncDesktopNamePseudo }
 
-// Read implements the Encoding interface.
-func (enc *DesktopNamePseudoEncoding) Read(c Conn, rect *Rectangle) error {
-	var length uint32
-	if err := binary.Read(c, binary.BigEndian, &length); err != nil {
-		return err
-	}
-	name := make([]byte, length)
-	if err := binary.Read(c, binary.BigEndian, &name); err != nil {
-		return err
-	}
-	enc.Name = name
-	return nil
-}
-
-func (enc *DesktopNamePseudoEncoding) Write(c Conn, rect *Rectangle) error {
-	if err := binary.Write(c, binary.BigEndian, uint32(len(enc.Name))); err != nil {
-		return err
-	}
-	if err := binary.Write(c, binary.BigEndian, enc.Name); err != nil {
-		return err
-	}
-
-	return c.Flush()
-}
+// Reset does nothing as this encoding is stateless.
+func (e *DesktopNameEncoding) Reset() {}

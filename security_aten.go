@@ -1,107 +1,35 @@
 package vnc2video
 
 import (
-	"bytes"
 	"encoding/binary"
-	"fmt"
+	"errors"
 )
 
-type ClientAuthATEN struct {
-	Username []byte
-	Password []byte
+// SecurityAtenHermon implements a vendor-specific security type used by
+// some Aten KVM devices.
+type SecurityAtenHermon struct {
+	// The SubType field was removed during refactoring as it was not used.
 }
 
-func (*ClientAuthATEN) Type() SecurityType {
-	return SecTypeATEN
+// Type returns the security type identifier.
+func (s *SecurityAtenHermon) Type() SecurityType {
+	return SecTypeAtenHermon
 }
 
-func (*ClientAuthATEN) SubType() SecuritySubType {
-	return SecSubTypeUnknown
-}
-
-func charCodeAt(s string, n int) rune {
-	for i, r := range s {
-		if i == n {
-			return r
-		}
-	}
-	return 0
-}
-
-func (auth *ClientAuthATEN) Auth(c Conn) error {
-	var definedAuthLen = 24
-
-	if len(auth.Username) > definedAuthLen || len(auth.Password) > definedAuthLen {
-		return fmt.Errorf("username/password is too long, allowed 0-23")
+// Authenticate performs the security handshake. For this specific type,
+// it appears to be a no-op on the client side other than checking the result.
+func (s *SecurityAtenHermon) Authenticate(c Conn) error {
+	// This security handler is client-side only in this implementation.
+	if _, ok := c.Config().(*ClientConfig); !ok {
+		return errors.New("aten-hermon: server-side authentication not implemented")
 	}
 
-	nt, err := readTightTunnels(c)
-	if err != nil {
+	var securityResult uint32
+	if err := binary.Read(c, binary.BigEndian, &securityResult); err != nil {
 		return err
 	}
-	/*
-		fmt.Printf("tunnels %d\n", nt)
-		for i := uint32(0); i < nt; i++ {
-			code, vendor, signature, err := readTightCaps(c)
-			if err != nil {
-				return err
-			}
-			fmt.Printf("code %d vendor %s signature %s\n", code, vendor, signature)
-		}
-	*/
-	if ((nt&0xffff0ff0)>>0 == 0xaff90fb0) || (nt <= 0 || nt > 0x1000000) {
-		c.SetProtoVersion("aten1")
-		var skip [20]byte
-		binary.Read(c, binary.BigEndian, &skip)
-		//fmt.Printf("skip %v\n", skip)
+	if securityResult != 0 {
+		return errors.New("aten-hermon: authentication failed")
 	}
-
-	username := make([]byte, definedAuthLen)
-	password := make([]byte, definedAuthLen)
-	copy(username, auth.Username)
-	copy(password, auth.Password)
-	challenge := bytes.Join([][]byte{username, password}, []byte(""))
-	if err := binary.Write(c, binary.BigEndian, challenge); err != nil {
-		return err
-	}
-
-	if err := c.Flush(); err != nil {
-		return err
-	}
-	/*
-
-		sendUsername := make([]byte, definedAuthLen)
-		for i := 0; i < definedAuthLen; i++ {
-			if i < len(auth.Username) {
-				sendUsername[i] = byte(charCodeAt(string(auth.Username), i))
-			} else {
-				sendUsername[i] = 0
-			}
-		}
-
-		sendPassword := make([]byte, definedAuthLen)
-
-		for i := 0; i < definedAuthLen; i++ {
-			if i < len(auth.Password) {
-				sendPassword[i] = byte(charCodeAt(string(auth.Password), i))
-			} else {
-				sendPassword[i] = 0
-			}
-		}
-
-		if err := binary.Write(c, binary.BigEndian, sendUsername); err != nil {
-			return err
-		}
-		if err := binary.Write(c, binary.BigEndian, sendPassword); err != nil {
-			return err
-		}
-
-		if err := c.Flush(); err != nil {
-			return err
-		}
-	*/
-	//var pp [10]byte
-	//binary.Read(c, binary.BigEndian, &pp)
-	//fmt.Printf("ddd %v\n", pp)
 	return nil
 }

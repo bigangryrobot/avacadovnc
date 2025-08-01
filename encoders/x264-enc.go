@@ -8,7 +8,7 @@ import (
 	"os/exec"
 	"strconv"
 
-	"github.com/bhmj/vnc2video/logger"
+	"github.com/bigangryrobot/vnc2video/logger"
 )
 
 type X264ImageEncoder struct {

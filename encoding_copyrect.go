@@ -2,62 +2,45 @@ package vnc2video
 
 import (
 	"encoding/binary"
+	"fmt"
 	"image"
-	"image/draw"
 
-	"github.com/bhmj/vnc2video/logger"
 )
 
-type CopyRectEncoding struct {
-	SX, SY uint16
-	Image  draw.Image
+// CopyRectEncoding implements the CopyRect encoding, which is used to copy a
+// rectangular area from one part of the framebuffer to another.
+type CopyRectEncoding struct{}
+
+// Type returns the encoding type identifier.
+func (e *CopyRectEncoding) Type() EncodingType {
+	return EncCopyRect
 }
 
-func (*CopyRectEncoding) Supported(Conn) bool {
-	return true
-}
-func (*CopyRectEncoding) Reset() error {
-	return nil
-}
-func (*CopyRectEncoding) Type() EncodingType { return EncCopyRect }
-
-func (enc *CopyRectEncoding) SetTargetImage(img draw.Image) {
-	//logger.Tracef("!!!!!!!!!!!!!setting image: %v", img.Bounds())
-	enc.Image = img
-}
-
-func (enc *CopyRectEncoding) Read(c Conn, rect *Rectangle) error {
-	logger.Tracef("Reading: CopyRect %v", rect)
-	if err := binary.Read(c, binary.BigEndian, &enc.SX); err != nil {
-		return err
+// Read decodes the CopyRect data, which consists of the source X and Y coordinates.
+func (e *CopyRectEncoding) Read(c Conn, rect *Rectangle) error {
+	var srcX, srcY uint16
+	if err := binary.Read(c, binary.BigEndian, &srcX); err != nil {
+		return fmt.Errorf("copyrect: failed to read source X: %w", err)
 	}
-	if err := binary.Read(c, binary.BigEndian, &enc.SY); err != nil {
-		return err
-	}
-	cpyIm := image.NewRGBA(image.Rectangle{Min: image.Point{0, 0}, Max: image.Point{int(rect.Width), int(rect.Height)}})
-	for x := 0; x < int(rect.Width); x++ {
-		for y := 0; y < int(rect.Height); y++ {
-			col := enc.Image.At(x+int(enc.SX), y+int(enc.SY))
-			cpyIm.Set(x, y, col)
-		}
+	if err := binary.Read(c, binary.BigEndian, &srcY); err != nil {
+		return fmt.Errorf("copyrect: failed to read source Y: %w", err)
 	}
 
-	for x := 0; x < int(rect.Width); x++ {
-		for y := 0; y < int(rect.Height); y++ {
-			col := cpyIm.At(x, y)
-			enc.Image.Set(int(rect.X)+x, int(rect.Y)+y, col)
-		}
+	clientConn, ok := c.(*ClientConn)
+	if !ok || clientConn.Canvas == nil {
+		return nil // No canvas to draw on.
 	}
 
-	return nil
+	// Perform the copy operation on the canvas.
+	srcPoint := image.Point{int(srcX), int(srcY)}
+	dstPoint := image.Point{int(rect.X), int(rect.Y)}
+	size := image.Point{int(rect.Width), int(rect.Height)}
+
+	return clientConn.Canvas.Copy(srcPoint, dstPoint, size)
 }
 
-func (enc *CopyRectEncoding) Write(c Conn, rect *Rectangle) error {
-	if err := binary.Write(c, binary.BigEndian, enc.SX); err != nil {
-		return err
-	}
-	if err := binary.Write(c, binary.BigEndian, enc.SY); err != nil {
-		return err
-	}
-	return nil
+// Reset conforms to the Encoding interface.
+// This was changed from `Reset() error` to `Reset()` to match the interface.
+func (e *CopyRectEncoding) Reset() {
+	// No state to reset in this implementation.
 }

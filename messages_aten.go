@@ -77,7 +77,7 @@ func (msg *AteniKVMKeyEvent) Supported(c Conn) bool {
 }
 
 func (msg *AteniKVMKeyEvent) String() string {
-	return fmt.Sprintf("down:%d, key:%s", msg.Down, msg.Key)
+	return fmt.Sprintf("down:%d, key:%d", msg.Down, msg.Key)
 }
 
 func (msg *AteniKVMKeyEvent) Type() ClientMessageType {
