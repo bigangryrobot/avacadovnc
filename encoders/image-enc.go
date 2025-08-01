@@ -7,7 +7,7 @@ import (
 	"image/color"
 	"io"
 
-	"github.com/bigangryrobot/vnc2video"
+	"github.com/bigangryrobot/avacadovnc"
 )
 
 func encodePPMGeneric(w io.Writer, img image.Image) error {
@@ -72,7 +72,7 @@ func encodePPM(w io.Writer, img image.Image) error {
 	if img == nil {
 		return errors.New("nil image")
 	}
-	img1, isRGBImage := img.(*vnc2video.RGBImage)
+	img1, isRGBImage := img.(*avacadovnc.RGBImage)
 	img2, isRGBA := img.(*image.RGBA)
 	if isRGBImage {
 		return encodePPMforRGBImage(w, img1)
@@ -82,7 +82,7 @@ func encodePPM(w io.Writer, img image.Image) error {
 	return encodePPMGeneric(w, img)
 }
 
-func encodePPMforRGBImage(w io.Writer, img *vnc2video.RGBImage) error {
+func encodePPMforRGBImage(w io.Writer, img *avacadovnc.RGBImage) error {
 	maxvalue := 255
 	size := img.Bounds()
 	// write ppm header

@@ -10,7 +10,7 @@ import (
 	"log"
 	"os"
 
-	vnc "github.com/bigangryrobot/vnc2video"
+	vnc "github.com/bigangryrobot/avacadovnc"
 )
 
 func main() {
@@ -107,7 +107,7 @@ func main() {
 }
 
 // FramebufferUpdateMessage is a placeholder from the original example.
-// The actual implementation is now within the vnc2video package.
+// The actual implementation is now within the avacadovnc package.
 // We need this struct here to satisfy the Read method call.
 type FramebufferUpdateMessage struct{}
 
