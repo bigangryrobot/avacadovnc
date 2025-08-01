@@ -62,7 +62,7 @@ func (e *ZRLEEncoding) Read(c Conn, rect *Rectangle) error {
 	}
 
 	pf := c.PixelFormat()
-	bytesPerPixel := pf.BytesPerPixel()
+	bytesPerPixel := pf.BPP
 
 	for y := uint16(0); y < rect.Height; {
 		for x := uint16(0); x < rect.Width; {
@@ -90,7 +90,7 @@ func (e *ZRLEEncoding) Read(c Conn, rect *Rectangle) error {
 			}
 
 			// Decode the tile data.
-			if err := e.decodeTile(clientConn, rect.X+x, rect.Y+y, uint16(tileW), uint16(tileH), isRLE, palette, bytesPerPixel); err != nil {
+			if err := e.decodeTile(clientConn, rect.X+x, rect.Y+y, uint16(tileW), uint16(tileH), isRLE, palette, int(bytesPerPixel)); err != nil {
 				return err
 			}
 

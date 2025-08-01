@@ -56,7 +56,7 @@ func main() {
 		ServerMessageCh: serverCh,
 		Messages: []vnc.ServerMessage{
 			&vnc.FramebufferUpdateMessage{},
-			&vnc.SetColourMapEntriesMessage{},
+			&vnc.SetColorMapEntriesMessage{},
 			&vnc.ServerBellMessage{},
 			&vnc.ServerCutTextMessage{},
 		},

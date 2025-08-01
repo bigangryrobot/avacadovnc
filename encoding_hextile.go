@@ -86,7 +86,7 @@ func (e *HextileEncoding) Read(c Conn, rect *Rectangle) error {
 
 				for i := 0; i < int(numSubRects); i++ {
 					var subRectColor []byte
-					if subEncoding&16 != 0 { // SubrectsColoured
+					if subEncoding&16 != 0 { // SubrectsColored
 						subRectColor = make([]byte, bytesPerPixel)
 						if _, err := io.ReadFull(c, subRectColor); err != nil {
 							return fmt.Errorf("hextile: failed to read sub-rect color: %w", err)

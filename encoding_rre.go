@@ -28,7 +28,7 @@ func (e *RREEncoding) Read(c Conn, rect *Rectangle) error {
 	}
 
 	pf := c.PixelFormat()
-	bytesPerPixel := pf.BytesPerPixel()
+	bytesPerPixel := pf.BPP
 	if bytesPerPixel == 0 {
 		return fmt.Errorf("rre: bytes per pixel is zero")
 	}

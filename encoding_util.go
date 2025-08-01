@@ -1,10 +1,12 @@
 package avacadovnc
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"image/color"
 	"io"
+	"sync"
 )
 
 // ReadPixel reads the raw bytes for a single pixel from the reader based on the
@@ -47,7 +49,7 @@ func PixelToRGBA(pixel uint32, pf *PixelFormat, cm *ColorMap) color.RGBA {
 	if pf.TrueColor == 0 {
 		// Paletted color. The pixel value is an index into the color map.
 		if cm != nil && pixel < uint32(len(cm)) {
-			return cm[pixel]
+			return color.RGBA{uint8(cm[pixel].R), uint8(cm[pixel].G), uint8(cm[pixel].B), 255}
 		}
 		// Fallback if color map is missing or index is out of bounds.
 		// This shouldn't happen in a valid VNC session.
@@ -75,4 +77,13 @@ func pixelOrder(pf *PixelFormat) binary.ByteOrder {
 		return binary.BigEndian
 	}
 	return binary.LittleEndian
+}
+
+var bPool = sync.Pool{
+	New: func() interface{} {
+		// The Pool's New function should generally only return pointer
+		// types, since a pointer can be put into the return interface
+		// value without an allocation:
+		return new(bytes.Buffer)
+	},
 }
