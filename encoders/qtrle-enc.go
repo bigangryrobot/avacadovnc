@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bigangryrobot/vnc2video/logger"
+	"github.com/bigangryrobot/avacadovnc/logger"
 )
 
 // QTRLEImageEncoder quick time rle is an efficient loseless codec, uses .mov extension

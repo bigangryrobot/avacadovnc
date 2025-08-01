@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bigangryrobot/vnc2video/logger"
+	"github.com/bigangryrobot/avacadovnc/logger"
 )
 
 type VP8ImageEncoder struct {

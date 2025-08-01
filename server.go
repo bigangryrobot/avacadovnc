@@ -1,4 +1,4 @@
-package vnc2video
+package avacadovnc
 
 import (
 	"bufio"
@@ -7,7 +7,7 @@ import (
 	"net"
 	"sync"
 
-	"github.com/bigangryrobot/vnc2video/logger"
+	"github.com/bigangryrobot/avacadovnc/logger"
 )
 
 // Server represents a VNC server that listens for and manages incoming client connections.

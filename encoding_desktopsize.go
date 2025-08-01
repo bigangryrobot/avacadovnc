@@ -1,4 +1,4 @@
-package vnc2video
+package avacadovnc
 
 // DesktopSizeEncoding implements the DesktopSize pseudo-encoding, which is used
 // by the server to inform the client that the framebuffer has been resized.

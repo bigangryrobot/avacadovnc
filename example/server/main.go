@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/bigangryrobot/vnc2video"
-	"github.com/bigangryrobot/vnc2video/logger"
+	"github.com/bigangryrobot/avacadovnc"
+	"github.com/bigangryrobot/avacadovnc/logger"
+
 )
 
 func main() {
@@ -22,25 +23,25 @@ func main() {
 	//logger.SetLevel(logger.InfoLevel)
 
 	// Configure the VNC server.
-	cfg := &vnc2video.ServerConfig{
-		SecurityHandlers: []vnc2video.SecurityHandler{
-			&vnc2video.SecurityNone{},
+	cfg := &avacadovnc.ServerConfig{
+		SecurityHandlers: []avacadovnc.SecurityHandler{
+			&avacadovnc.SecurityNone{},
 		},
-		PixelFormat: vnc2video.DefaultPixelFormat,
-		DesktopName: "vnc2video-server",
+		PixelFormat: avacadovnc.DefaultPixelFormat,
+		DesktopName: "avacadovnc-server",
 		Width:       1024,
 		Height:      768,
 		// Define the handlers for the server handshake process.
-		Handlers: []vnc2video.Handler{
-			&vnc2video.DefaultServerVersionHandler{},
-			&vnc2video.DefaultServerSecurityHandler{},
-			&vnc2video.DefaultServerClientInitHandler{},
-			&vnc2video.DefaultServerServerInitHandler{},
+		Handlers: []avacadovnc.Handler{
+			&avacadovnc.DefaultServerVersionHandler{},
+			&avacadovnc.DefaultServerSecurityHandler{},
+			&avacadovnc.DefaultServerClientInitHandler{},
+			&avacadovnc.DefaultServerServerInitHandler{},
 			// A message handler would go here to manage the session.
 		},
 	}
 
-	server, err := vnc2video.NewServer(cfg)
+	server, err := avacadovnc.NewServer(cfg)
 	if err != nil {
 		logger.Fatalf("failed to create server: %v", err)
 	}

@@ -1,4 +1,4 @@
-package vnc2video
+package avacadovnc
 
 import (
 	"bufio"
@@ -11,7 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bigangryrobot/vnc2video/logger"
+	"github.com/bigangryrobot/avacadovnc/logger"
+
 )
 
 var (

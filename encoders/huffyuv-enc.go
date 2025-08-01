@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bigangryrobot/vnc2video/logger"
+	"github.com/bigangryrobot/avacadovnc/logger"
 )
 
 // this is a very common loseless encoder (but produces huge files)

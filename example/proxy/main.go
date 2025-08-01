@@ -8,8 +8,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/bigangryrobot/vnc2video/logger"
-
+	"github.com/bigangryrobot/avacadovnc/logger"
 )
 
 func main() {

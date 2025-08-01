@@ -1,4 +1,4 @@
-package vnc2video
+package avacadovnc
 
 import (
 	"bufio"

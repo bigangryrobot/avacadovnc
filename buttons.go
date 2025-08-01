@@ -1,4 +1,4 @@
-package vnc2video
+package avacadovnc
 
 // Button represents a mask of pointer presses/releases.
 type Button uint8

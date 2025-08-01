@@ -1,4 +1,4 @@
-package vnc2video
+package avacadovnc
 
 import (
 	"bytes"
@@ -8,7 +8,7 @@ import (
 	"image/png"
 	"io"
 
-	"github.com/bigangryrobot/vnc2video/logger"
+	"github.com/bigangryrobot/avacadovnc/logger"
 )
 
 // TightEncoding implements the Tight VNC encoding, a highly efficient encoding

@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	vnc "github.com/bigangryrobot/vnc2video"
-	"github.com/bigangryrobot/vnc2video/logger"
+	vnc "github.com/bigangryrobot/avacadovnc"
+	"github.com/bigangryrobot/avacadovnc/logger"
 )
 
 func main() {

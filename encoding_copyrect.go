@@ -1,10 +1,9 @@
-package vnc2video
+package avacadovnc
 
 import (
 	"encoding/binary"
 	"fmt"
 	"image"
-
 )
 
 // CopyRectEncoding implements the CopyRect encoding, which is used to copy a

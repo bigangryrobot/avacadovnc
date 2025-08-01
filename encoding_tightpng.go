@@ -1,4 +1,4 @@
-package vnc2video
+package avacadovnc
 
 import (
 	"bytes"
@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image/png"
 	"io"
+
 )
 
 // TightPNGEncoding implements the TightPNG encoding, which is a variation
